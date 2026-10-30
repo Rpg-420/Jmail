@@ -3,7 +3,7 @@
 **فارسی:** مستندات کامل به فارسی در [docs/fa/](docs/fa/README.md) (نصب، مرجع API، اتصال پروژه‌ها، وب‌هوک).
 
 JMail is the project name throughout the app, workspace packages, notifications and exports.
-Repository: https://github.com/DevURANIUM/QMail.
+Repository: https://github.com/Rpg-420/JMail — a personal fork of [QMail](https://github.com/DevURANIUM/QMail) (MIT), extended into a mail server other projects can call.
 The production Worker is `jmail`; deployment preserves its existing D1 binding.
 
 Self-hosted email on your own domain, running entirely on Cloudflare's edge.
@@ -118,7 +118,7 @@ The long version, including DNS records and troubleshooting, is
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/DevURANIUM/QMail.git JMail
+git clone https://github.com/Rpg-420/JMail.git JMail
 cd JMail
 pnpm install
 
@@ -532,4 +532,5 @@ MIT — see LICENSE.
 
 ## Support
 
-Issues and feature requests: [GitHub Issues](https://github.com/DevURANIUM/QMail/issues).
+Issues and feature requests: [GitHub Issues](https://github.com/Rpg-420/JMail/issues).
+Upstream project this fork builds on: [QMail](https://github.com/DevURANIUM/QMail).

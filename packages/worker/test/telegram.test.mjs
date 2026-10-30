@@ -6,11 +6,11 @@ const require = createRequire(import.meta.url);
 // Use the installed workspace compiler, including copied pnpm checkouts with missing links.
 let ts;
 try { ts = require('typescript'); } catch {
-  const root = new URL('../../node_modules/.pnpm/', import.meta.url);
+  const root = new URL('../../../node_modules/.pnpm/', import.meta.url);
   const version = fs.readdirSync(root).find(name => name.startsWith('typescript@'));
   ts = require(new URL(`${version}/node_modules/typescript/lib/typescript.js`, root).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
 }
-const source = fs.readFileSync(new URL('./src/lib/telegram.ts', import.meta.url), 'utf8');
+const source = fs.readFileSync(new URL('../src/lib/telegram.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2021 } }).outputText;
 const { validateTelegramConfig, telegramChunks, sendTelegramMessage, notifyTelegram } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 const token = `123456789:${'a'.repeat(35)}`;
