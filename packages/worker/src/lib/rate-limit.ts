@@ -102,13 +102,14 @@ export class RateLimiter {
 }
 
 /**
- * Get client IP from request headers
+ * Get the client IP the platform attests to.
+ *
+ * Only `cf.clientIp` / `cf-connecting-ip` are used on purpose: `x-real-ip` and
+ * `x-forwarded-for` are attacker-controlled here, and a limiter keyed on them
+ * is a limiter that can be turned off with one header. Local development has no
+ * Cloudflare metadata, so those requests share one bucket — fine on a loopback.
  */
 export function getClientIP(request: Request): string {
-  return (
-    request.headers.get('cf-connecting-ip') ||
-    request.headers.get('x-real-ip') ||
-    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-    'unknown'
-  );
+  const cf = (request as Request & { cf?: { clientIp?: string } }).cf;
+  return cf?.clientIp || request.headers.get('cf-connecting-ip') || 'unknown';
 }

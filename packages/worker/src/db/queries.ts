@@ -21,7 +21,13 @@ export interface Email {
   thread_id: string | null;
   delivery_status: string | null;
   scheduled_at: string | null;
-  mailgun_id: string | null;
+  provider_message_id: string | null;
+  token_id: string | null;
+  idempotency_key: string | null;
+  attempts: number;
+  next_attempt_at: string | null;
+  last_error: string | null;
+  provider: string | null;
   created_at: string;
   /** Populated by list/search queries via subselect */
   attachment_count?: number;
@@ -87,6 +93,76 @@ export interface Credential {
   last_used_at: string | null;
 }
 
+/** Fields accepted by createEmail; only identity and envelope are required. */
+export interface NewEmailInput {
+  id: string;
+  type: EmailType;
+  from_address: string;
+  to_address: string;
+  cc?: string | null;
+  bcc?: string | null;
+  subject?: string | null;
+  body_text?: string | null;
+  body_html?: string | null;
+  headers?: string | null;
+  raw_size?: number | null;
+  is_read?: number;
+  is_starred?: number;
+  archived?: number;
+  labels?: string;
+  message_id?: string | null;
+  in_reply_to?: string | null;
+  thread_id?: string | null;
+  delivery_status?: string | null;
+  scheduled_at?: string | null;
+  provider_message_id?: string | null;
+  token_id?: string | null;
+  idempotency_key?: string | null;
+  attempts?: number;
+  next_attempt_at?: string | null;
+  last_error?: string | null;
+  provider?: string | null;
+}
+
+export interface ApiToken {
+  id: string;
+  token_hash: string;
+  token_prefix: string;
+  name: string;
+  /** JSON array of scope names */
+  scopes: string;
+  identity_address: string | null;
+  rate_per_min: number;
+  daily_budget: number;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface WebhookEndpoint {
+  id: string;
+  url: string;
+  secret: string;
+  /** JSON array of event names */
+  events: string;
+  token_id: string | null;
+  active: number;
+  created_at: string;
+}
+
+export interface WebhookDelivery {
+  id: string;
+  endpoint_id: string;
+  event: string;
+  payload: string;
+  status: 'pending' | 'delivered' | 'failed';
+  attempts: number;
+  next_attempt_at: string;
+  last_error: string | null;
+  created_at: string;
+  delivered_at: string | null;
+}
+
 export class DatabaseQueries {
   constructor(private db: D1Database) {}
 
@@ -111,6 +187,10 @@ export class DatabaseQueries {
       .run();
   }
 
+  async deleteSetting(key: string): Promise<void> {
+    await this.db.prepare('DELETE FROM settings WHERE key = ?').bind(key).run();
+  }
+
   async getAllSettings(): Promise<Record<string, string>> {
     const results = await this.db
       .prepare('SELECT key, value FROM settings')
@@ -125,26 +205,26 @@ export class DatabaseQueries {
 
   // ==================== Emails ====================
 
-  async createEmail(email: Omit<Email, 'created_at' | 'archived' | 'labels' | 'message_id' | 'in_reply_to' | 'thread_id' | 'delivery_status' | 'scheduled_at'> & Partial<Pick<Email, 'archived' | 'labels' | 'message_id' | 'in_reply_to' | 'thread_id' | 'delivery_status' | 'scheduled_at'>>): Promise<void> {
+  async createEmail(email: NewEmailInput): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO emails (id, type, from_address, to_address, cc, bcc, subject, body_text, body_html, headers, raw_size, is_read, is_starred, archived, labels, message_id, in_reply_to, thread_id, delivery_status, scheduled_at, mailgun_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO emails (id, type, from_address, to_address, cc, bcc, subject, body_text, body_html, headers, raw_size, is_read, is_starred, archived, labels, message_id, in_reply_to, thread_id, delivery_status, scheduled_at, provider_message_id, token_id, idempotency_key, attempts, next_attempt_at, last_error, provider)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         email.id,
         email.type,
         email.from_address,
         email.to_address,
-        email.cc,
-        email.bcc,
-        email.subject,
-        email.body_text,
-        email.body_html,
-        email.headers,
-        email.raw_size,
-        email.is_read,
-        email.is_starred,
+        email.cc ?? null,
+        email.bcc ?? null,
+        email.subject ?? null,
+        email.body_text ?? null,
+        email.body_html ?? null,
+        email.headers ?? null,
+        email.raw_size ?? null,
+        email.is_read ?? 0,
+        email.is_starred ?? 0,
         email.archived ?? 0,
         email.labels ?? '[]',
         email.message_id ?? null,
@@ -152,7 +232,13 @@ export class DatabaseQueries {
         email.thread_id ?? null,
         email.delivery_status ?? null,
         email.scheduled_at ?? null,
-        email.mailgun_id
+        email.provider_message_id ?? null,
+        email.token_id ?? null,
+        email.idempotency_key ?? null,
+        email.attempts ?? 0,
+        email.next_attempt_at ?? null,
+        email.last_error ?? null,
+        email.provider ?? null
       )
       .run();
   }
@@ -263,9 +349,40 @@ export class DatabaseQueries {
     return results.results || [];
   }
 
+  /** Messages submitted by one API token, newest first, with status filtering. */
+  async listEmailsByToken(
+    tokenId: string,
+    options: { limit?: number; offset?: number; status?: string; idempotencyKey?: string } = {}
+  ): Promise<Email[]> {
+    const conditions = ['token_id = ?'];
+    const params: (string | number)[] = [tokenId];
+
+    if (options.status === 'pending') {
+      conditions.push("(delivery_status IS NULL OR delivery_status IN ('queued', 'deferred'))");
+    } else if (options.status) {
+      conditions.push('delivery_status = ?');
+      params.push(options.status);
+    }
+
+    if (options.idempotencyKey) {
+      conditions.push('idempotency_key = ?');
+      params.push(options.idempotencyKey);
+    }
+
+    const limit = options.limit ?? 25;
+    const offset = options.offset ?? 0;
+
+    const results = await this.db
+      .prepare(
+        `SELECT * FROM emails WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+      )
+      .bind(...params, limit, offset)
+      .all<Email>();
+    return results.results || [];
+  }
+
   /**
-   * Full-text search across subject, body, and addresses (FTS5).
-   * The query is normalized into quoted terms so FTS syntax can't error.
+   * Full-text search across subject, body, and addresses (FTS5).   * The query is normalized into quoted terms so FTS syntax can't error.
    */
   async searchEmails(query: string, limit = 50): Promise<Email[]> {
     const terms = query
@@ -327,38 +444,41 @@ export class DatabaseQueries {
     return (results.results || []).map(r => r.label);
   }
 
-  async getEmailByBrevoMessageId(brevoMessageId: string): Promise<Email | null> {
+  async getEmailByProviderMessageId(providerMessageId: string): Promise<Email | null> {
     return this.db
-      .prepare("SELECT * FROM emails WHERE mailgun_id = ? AND type = 'sent' LIMIT 1")
-      .bind(brevoMessageId)
+      .prepare("SELECT * FROM emails WHERE provider_message_id = ? AND type = 'sent' LIMIT 1")
+      .bind(providerMessageId)
       .first<Email>();
   }
 
-  async updateDeliveryStatus(brevoMessageId: string, status: string): Promise<void> {
+  async updateDeliveryStatus(providerMessageId: string, status: string): Promise<void> {
     await this.db
-      .prepare("UPDATE emails SET delivery_status = ? WHERE mailgun_id = ? AND type = 'sent'")
-      .bind(status, brevoMessageId)
+      .prepare("UPDATE emails SET delivery_status = ? WHERE provider_message_id = ? AND type = 'sent'")
+      .bind(status, providerMessageId)
       .run();
   }
 
   /**
    * Convert a pending/draft/scheduled row into a sent email after delivery.
-   * Brevo's message id becomes the RFC Message-ID so future replies thread.
+   * The relay's message id becomes the RFC Message-ID so future replies thread.
    */
-  async markEmailSent(id: string, brevoMessageId: string | null): Promise<void> {
+  async markEmailSent(id: string, providerMessageId: string | null, provider: string | null = null): Promise<void> {
     await this.db
       .prepare(
         `UPDATE emails SET
            type = 'sent',
            delivery_status = 'queued',
-           mailgun_id = ?,
+           provider_message_id = ?,
+           provider = COALESCE(?, provider),
            message_id = COALESCE(?, message_id),
            thread_id = COALESCE(thread_id, ?, id),
            scheduled_at = NULL,
+           next_attempt_at = NULL,
+           last_error = NULL,
            created_at = datetime('now')
          WHERE id = ?`
       )
-      .bind(brevoMessageId, brevoMessageId, brevoMessageId, id)
+      .bind(providerMessageId, provider, providerMessageId, providerMessageId, id)
       .run();
   }
 
@@ -538,6 +658,11 @@ export class DatabaseQueries {
     await this.db
       .prepare("DELETE FROM sessions WHERE expires_at < datetime('now')")
       .run();
+  }
+
+  /** Used after a password change: an old session must not outlive the secret. */
+  async deleteAllSessions(): Promise<void> {
+    await this.db.prepare('DELETE FROM sessions').run();
   }
 
   // ==================== Attachments ====================
@@ -726,14 +851,423 @@ export class DatabaseQueries {
    * Returns true if the challenge existed and was still valid.
    */
   async consumeChallenge(type: 'registration' | 'authentication', challenge: string): Promise<boolean> {
-    const found = await this.db
-      .prepare("SELECT id FROM challenges WHERE type = ? AND challenge = ? AND expires_at > datetime('now')")
+    // One statement, so two concurrent verifications of the same challenge
+    // cannot both see it alive and both pass.
+    const consumed = await this.db
+      .prepare("DELETE FROM challenges WHERE type = ? AND challenge = ? AND expires_at > datetime('now') RETURNING id")
       .bind(type, challenge)
       .first<{ id: string }>();
 
-    if (!found) return false;
+    return !!consumed;
+  }
 
-    await this.db.prepare('DELETE FROM challenges WHERE id = ?').bind(found.id).run();
-    return true;
+  // ==================== API tokens (mail-server surface) ====================
+
+  async createApiToken(token: {
+    id: string;
+    token_hash: string;
+    token_prefix: string;
+    name: string;
+    scopes: string[];
+    identity_address: string | null;
+    rate_per_min: number;
+    daily_budget: number;
+  }): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO api_tokens (id, token_hash, token_prefix, name, scopes, identity_address, rate_per_min, daily_budget)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        token.id,
+        token.token_hash,
+        token.token_prefix,
+        token.name,
+        JSON.stringify(token.scopes),
+        token.identity_address,
+        token.rate_per_min,
+        token.daily_budget
+      )
+      .run();
+  }
+
+  async listApiTokens(day: string): Promise<Array<ApiToken & { sent_today: number; failed_today: number }>> {
+    const results = await this.db
+      .prepare(
+        `SELECT t.*, COALESCE(u.sent, 0) AS sent_today, COALESCE(u.failed, 0) AS failed_today
+         FROM api_tokens t
+         LEFT JOIN token_usage u ON u.token_id = t.id AND u.day = ?
+         ORDER BY t.created_at DESC`
+      )
+      .bind(day)
+      .all<ApiToken & { sent_today: number; failed_today: number }>();
+    return results.results || [];
+  }
+
+  async getApiTokenByHash(tokenHash: string): Promise<ApiToken | null> {
+    return this.db
+      .prepare('SELECT * FROM api_tokens WHERE token_hash = ? AND revoked_at IS NULL')
+      .bind(tokenHash)
+      .first<ApiToken>();
+  }
+
+  async getApiToken(id: string): Promise<ApiToken | null> {
+    return this.db.prepare('SELECT * FROM api_tokens WHERE id = ?').bind(id).first<ApiToken>();
+  }
+
+  async updateApiToken(id: string, fields: { name: string; scopes: string[]; identity_address: string | null; rate_per_min: number; daily_budget: number }): Promise<void> {
+    await this.db
+      .prepare('UPDATE api_tokens SET name = ?, scopes = ?, identity_address = ?, rate_per_min = ?, daily_budget = ? WHERE id = ?')
+      .bind(fields.name, JSON.stringify(fields.scopes), fields.identity_address, fields.rate_per_min, fields.daily_budget, id)
+      .run();
+  }
+
+  async revokeApiToken(id: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE api_tokens SET revoked_at = datetime('now') WHERE id = ?")
+      .bind(id)
+      .run();
+  }
+
+  async touchApiToken(id: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE api_tokens SET last_used_at = datetime('now') WHERE id = ?")
+      .bind(id)
+      .run();
+  }
+
+  async recordTokenUsage(tokenId: string, day: string, kind: 'sent' | 'failed'): Promise<void> {
+    const column = kind === 'sent' ? 'sent' : 'failed';
+    await this.db
+      .prepare(
+        `INSERT INTO token_usage (token_id, day, sent, failed, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT(token_id, day) DO UPDATE SET ${column} = ${column} + 1, updated_at = datetime('now')`
+      )
+      .bind(tokenId, day, kind === 'sent' ? 1 : 0, kind === 'failed' ? 1 : 0)
+      .run();
+  }
+
+  async getTokenUsage(tokenId: string, day: string): Promise<{ sent: number; failed: number }> {
+    const row = await this.db
+      .prepare('SELECT sent, failed FROM token_usage WHERE token_id = ? AND day = ?')
+      .bind(tokenId, day)
+      .first<{ sent: number; failed: number }>();
+    return { sent: row?.sent ?? 0, failed: row?.failed ?? 0 };
+  }
+
+  async listTokenUsageHistory(tokenId: string, days: number): Promise<Array<{ day: string; sent: number; failed: number }>> {
+    const results = await this.db
+      .prepare(
+        `SELECT day, sent, failed FROM token_usage
+         WHERE token_id = ? AND day >= date('now', ?)
+         ORDER BY day DESC`
+      )
+      .bind(tokenId, `-${days} days`)
+      .all<{ day: string; sent: number; failed: number }>();
+    return results.results || [];
+  }
+
+  // ==================== Provider quota ledger ====================
+
+  async getProviderUsage(provider: string, kind: 'day' | 'month', period: string): Promise<number> {
+    const row = await this.db
+      .prepare('SELECT used FROM provider_usage WHERE provider = ? AND kind = ? AND period = ?')
+      .bind(provider, kind, period)
+      .first<{ used: number }>();
+    return row?.used ?? 0;
+  }
+
+  async recordProviderUsage(provider: string, kind: 'day' | 'month', period: string): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO provider_usage (provider, kind, period, used, updated_at)
+         VALUES (?, ?, ?, 1, datetime('now'))
+         ON CONFLICT(provider, kind, period) DO UPDATE SET used = used + 1, updated_at = datetime('now')`
+      )
+      .bind(provider, kind, period)
+      .run();
+  }
+
+  /** Usage grouped by provider for the last N days, for the settings screen. */
+  async listProviderUsage(days: string[]): Promise<Array<{ provider: string; used: number }>> {
+    if (days.length === 0) return [];
+    const placeholders = days.map(() => '?').join(',');
+    const results = await this.db
+      .prepare(`SELECT provider, SUM(used) AS used FROM provider_usage WHERE kind = 'day' AND period IN (${placeholders}) GROUP BY provider`)
+      .bind(...days)
+      .all<{ provider: string; used: number }>();
+    return results.results || [];
+  }
+
+  /** Per-day, per-provider usage so the settings screen can draw a chart. */
+  async listProviderUsageHistory(days: number): Promise<Array<{ provider: string; period: string; used: number }>> {
+    const results = await this.db
+      .prepare(
+        `SELECT provider, period, used FROM provider_usage
+         WHERE kind = 'day' AND period >= date('now', ?)
+         ORDER BY period DESC, provider`
+      )
+      .bind(`-${days} days`)
+      .all<{ provider: string; period: string; used: number }>();
+    return results.results || [];
+  }
+
+  /** Queue depth by delivery status — the health number on the dashboard. */
+  async queueSummary(): Promise<Array<{ status: string; count: number }>> {
+    const results = await this.db
+      .prepare(
+        `SELECT COALESCE(delivery_status, 'queued') AS status, COUNT(*) AS count
+         FROM emails
+         WHERE type = 'scheduled'
+         GROUP BY COALESCE(delivery_status, 'queued')`
+      )
+      .all<{ status: string; count: number }>();
+    return results.results || [];
+  }
+
+  // ==================== Send queue ====================
+
+  /**
+   * Rows waiting to be delivered: API-submitted mail and scheduled sends.
+   * `next_attempt_at` implements backoff, so a broken relay is retried slowly
+   * instead of hammering it every minute.
+   */
+  async listDueQueueEmails(limit = 20): Promise<Email[]> {
+    const results = await this.db
+      .prepare(
+        `SELECT * FROM emails
+         WHERE type = 'scheduled'
+           AND scheduled_at <= datetime('now')
+           AND (delivery_status IS NULL OR delivery_status NOT IN ('delivered', 'failed'))
+           AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now'))
+         ORDER BY created_at
+         LIMIT ?`
+      )
+      .bind(limit)
+      .all<Email>();
+    return results.results || [];
+  }
+
+  /**
+   * Take exclusive ownership of one due row for `leaseSeconds`, so two
+   * overlapping cron drains never hand the same message to a relay twice.
+   *
+   * The claim repeats the predicate that made the row due, narrowed to one id,
+   * with the retry timestamp pushed past the lease: whichever writer lands
+   * first moves `next_attempt_at` into the future and the other matches zero
+   * rows. A drain that dies mid-send costs nothing but the lease — once it
+   * expires the message is due again.
+   */
+  async claimQueueEmail(id: string, leaseSeconds: number): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE emails
+            SET next_attempt_at = datetime('now', '+' || ? || ' seconds')
+          WHERE id = ?
+            AND type = 'scheduled'
+            AND scheduled_at <= datetime('now')
+            AND (delivery_status IS NULL OR delivery_status NOT IN ('delivered', 'failed'))
+            AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now'))`
+      )
+      .bind(leaseSeconds, id)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  async findEmailByIdempotencyKey(tokenId: string, idempotencyKey: string): Promise<Email | null> {
+    return this.db
+      .prepare('SELECT * FROM emails WHERE token_id = ? AND idempotency_key = ? LIMIT 1')
+      .bind(tokenId, idempotencyKey)
+      .first<Email>();
+  }
+
+  async updateEmailQueueFields(id: string, fields: {
+    delivery_status: string;
+    attempts: number;
+    next_attempt_at: string | null;
+    last_error: string | null;
+    provider: string | null;
+  }): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE emails SET delivery_status = ?, attempts = ?, next_attempt_at = ?, last_error = ?, provider = ? WHERE id = ?`
+      )
+      .bind(fields.delivery_status, fields.attempts, fields.next_attempt_at, fields.last_error, fields.provider, id)
+      .run();
+  }
+
+  /**
+   * Put a row back on the queue with a fresh due time. Used when the web UI
+   * sends and every relay is at quota — the mail is kept, not discarded.
+   */
+  async requeueEmail(id: string, nextAttemptAt: string, error: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE emails SET
+           type = 'scheduled',
+           scheduled_at = datetime('now'),
+           delivery_status = 'queued',
+           next_attempt_at = ?,
+           last_error = ?
+         WHERE id = ?`
+      )
+      .bind(nextAttemptAt, error.slice(0, 500), id)
+      .run();
+  }
+
+  /** Queue rows that were never delivered and are older than the retention window. */
+  async listExpiredQueueEmails(retentionDays: number): Promise<Email[]> {
+    const results = await this.db
+      .prepare(
+        `SELECT * FROM emails
+         WHERE type = 'scheduled'
+           AND (delivery_status IS NULL OR delivery_status NOT IN ('delivered', 'failed'))
+           AND created_at < datetime('now', ?)`
+      )
+      .bind(`-${retentionDays} days`)
+      .all<Email>();
+    return results.results || [];
+  }
+
+  // ==================== Outbound webhooks ====================
+
+  async createWebhookEndpoint(endpoint: {
+    id: string;
+    url: string;
+    secret: string;
+    events: string[];
+    token_id: string | null;
+  }): Promise<void> {
+    await this.db
+      .prepare('INSERT INTO webhook_endpoints (id, url, secret, events, token_id) VALUES (?, ?, ?, ?, ?)')
+      .bind(endpoint.id, endpoint.url, endpoint.secret, JSON.stringify(endpoint.events), endpoint.token_id)
+      .run();
+  }
+
+  async listWebhookEndpoints(): Promise<WebhookEndpoint[]> {
+    const results = await this.db
+      .prepare('SELECT * FROM webhook_endpoints ORDER BY created_at')
+      .all<WebhookEndpoint>();
+    return results.results || [];
+  }
+
+  async getWebhookEndpoint(id: string): Promise<WebhookEndpoint | null> {
+    return this.db.prepare('SELECT * FROM webhook_endpoints WHERE id = ?').bind(id).first<WebhookEndpoint>();
+  }
+
+  async deleteWebhookEndpoint(id: string): Promise<void> {
+    await this.db.batch([
+      this.db.prepare('DELETE FROM webhook_deliveries WHERE endpoint_id = ?').bind(id),
+      this.db.prepare('DELETE FROM webhook_endpoints WHERE id = ?').bind(id),
+    ]);
+  }
+
+  async setWebhookSecret(id: string, secret: string): Promise<void> {
+    await this.db.prepare('UPDATE webhook_endpoints SET secret = ? WHERE id = ?').bind(secret, id).run();
+  }
+
+  async listWebhookDeliveries(endpointId: string, limit = 50): Promise<WebhookDelivery[]> {
+    const results = await this.db
+      .prepare('SELECT * FROM webhook_deliveries WHERE endpoint_id = ? ORDER BY created_at DESC LIMIT ?')
+      .bind(endpointId, limit)
+      .all<WebhookDelivery>();
+    return results.results || [];
+  }
+
+  async getWebhookDelivery(id: string): Promise<WebhookDelivery | null> {
+    return this.db.prepare('SELECT * FROM webhook_deliveries WHERE id = ?').bind(id).first<WebhookDelivery>();
+  }
+
+  /** Endpoints subscribed to an event, optionally narrowed to one token. */
+  async listEndpointsForEvent(event: string, tokenId: string | null): Promise<WebhookEndpoint[]> {
+    const all = await this.listWebhookEndpoints();
+    return all.filter(endpoint => {
+      if (!endpoint.active) return false;
+      if (endpoint.token_id && tokenId && endpoint.token_id !== tokenId) return false;
+      if (endpoint.token_id && !tokenId) return false;
+      let events: unknown;
+      try {
+        events = JSON.parse(endpoint.events);
+      } catch {
+        return false;
+      }
+      return Array.isArray(events) && events.includes(event);
+    });
+  }
+
+  async queueWebhookDelivery(delivery: { id: string; endpoint_id: string; event: string; payload: string }): Promise<void> {
+    await this.db
+      .prepare('INSERT INTO webhook_deliveries (id, endpoint_id, event, payload, next_attempt_at) VALUES (?, ?, ?, ?, datetime(\'now\'))')
+      .bind(delivery.id, delivery.endpoint_id, delivery.event, delivery.payload)
+      .run();
+  }
+
+  async listDueWebhookDeliveries(limit = 25): Promise<WebhookDelivery[]> {
+    const results = await this.db
+      .prepare(
+        `SELECT * FROM webhook_deliveries
+         WHERE status = 'pending' AND next_attempt_at <= datetime('now')
+         ORDER BY created_at
+         LIMIT ?`
+      )
+      .bind(limit)
+      .all<WebhookDelivery>();
+    return results.results || [];
+  }
+
+  /**
+   * Push one pending delivery past the drain interval so a second tick, or a
+   * retried request, cannot post the same event twice while it is in flight.
+   * The row stays `pending`, so a tick that dies mid-post retries when the
+   * lease expires.
+   */
+  async claimWebhookDelivery(id: string, leaseSeconds: number): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE webhook_deliveries
+            SET next_attempt_at = datetime('now', '+' || ? || ' seconds')
+          WHERE id = ?
+            AND status = 'pending'
+            AND next_attempt_at <= datetime('now')`
+      )
+      .bind(leaseSeconds, id)
+      .run();
+    return (result.meta?.changes ?? 0) > 0;
+  }
+
+  async markWebhookDelivered(id: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE webhook_deliveries SET status = 'delivered', delivered_at = datetime('now'), last_error = NULL WHERE id = ?")
+      .bind(id)
+      .run();
+  }
+
+  async markWebhookAttemptFailed(id: string, attempts: number, nextAttemptAt: string, error: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE webhook_deliveries SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?")
+      .bind(attempts, nextAttemptAt, error.slice(0, 500), id)
+      .run();
+  }
+
+  async markWebhookFailed(id: string, attempts: number, error: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE webhook_deliveries SET status = 'failed', attempts = ?, last_error = ? WHERE id = ?")
+      .bind(attempts, error.slice(0, 500), id)
+      .run();
+  }
+
+  /** Dead webhook rows are kept for a week so a project can inspect misses. */
+  async pruneWebhookDeliveries(retentionDays = 7): Promise<void> {
+    await this.db
+      .prepare("DELETE FROM webhook_deliveries WHERE status != 'pending' AND created_at < datetime('now', ?)")
+      .bind(`-${retentionDays} days`)
+      .run();
+  }
+
+  /** Mail the caller can poll by the id we handed back. */
+  async getEmailByTokenAndIdempotency(tokenId: string, idempotencyKey: string): Promise<Email | null> {
+    return this.findEmailByIdempotencyKey(tokenId, idempotencyKey);
   }
 }
+

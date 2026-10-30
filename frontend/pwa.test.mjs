@@ -27,15 +27,15 @@ function worker(fetcher) {
   const cached = [];
   const offline = new Response('offline page');
   const context = {
-    self: { location: { origin: 'https://qmail.test' }, addEventListener: (name, callback) => { handlers[name] = callback; }, skipWaiting: async () => {}, clients: { claim: async () => {} } },
+    self: { location: { origin: 'https://jmail.test' }, addEventListener: (name, callback) => { handlers[name] = callback; }, skipWaiting: async () => {}, clients: { claim: async () => {} } },
     caches: { open: async () => ({ add: async url => cached.push(url) }), keys: async () => [], match: async () => offline },
     fetch: fetcher, URL, Response,
   };
   vm.runInNewContext(fs.readFileSync(new URL('./public/sw.js', import.meta.url), 'utf8'), context);
   return { handlers, cached };
 }
-test('manifest identifies standalone Qmail and provides real PNG icons', () => {
-  assert.equal(manifest.name, 'Qmail');
+test('manifest identifies standalone JMail and provides real PNG icons', () => {
+  assert.equal(manifest.name, 'JMail');
   assert.equal(manifest.display, 'standalone');
   assert.equal(manifest.scope, '/');
   assert.equal(manifest.id, '/');
@@ -57,18 +57,18 @@ test('install caches only public offline document', async () => {
 test('API, cross-origin and non-navigation requests bypass cache handler', () => {
   const { handlers } = worker(fetch);
   for (const request of [
-    { url: 'https://qmail.test/api/emails', mode: 'navigate', method: 'GET' },
-    { url: 'https://qmail.test/api', mode: 'navigate', method: 'GET' },
+    { url: 'https://jmail.test/api/emails', mode: 'navigate', method: 'GET' },
+    { url: 'https://jmail.test/api', mode: 'navigate', method: 'GET' },
     { url: 'https://other.test/', mode: 'navigate', method: 'GET' },
-    { url: 'https://qmail.test/assets/app.js', mode: 'cors', method: 'GET' },
-    { url: 'https://qmail.test/', mode: 'navigate', method: 'POST' },
+    { url: 'https://jmail.test/assets/app.js', mode: 'cors', method: 'GET' },
+    { url: 'https://jmail.test/', mode: 'navigate', method: 'POST' },
   ]) handlers.fetch({ request, respondWith: () => assert.fail('Must not intercept') });
 });
 test('failed navigation returns offline fallback, successful navigation remains network-only', async () => {
   for (const connected of [false, true]) {
     const { handlers } = worker(async () => { if (!connected) throw Error('offline'); return new Response('network'); });
     let response;
-    handlers.fetch({ request: { url: 'https://qmail.test/inbox', mode: 'navigate', method: 'GET' }, respondWith: promise => { response = promise; } });
+    handlers.fetch({ request: { url: 'https://jmail.test/inbox', mode: 'navigate', method: 'GET' }, respondWith: promise => { response = promise; } });
     assert.equal(await (await response).text(), connected ? 'network' : 'offline page');
   }
 });

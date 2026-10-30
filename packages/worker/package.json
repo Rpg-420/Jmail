@@ -1,18 +1,19 @@
 {
-  "name": "@qmail/worker",
+  "name": "@jmail/worker",
   "version": "1.0.0",
-  "description": "Qmail Cloudflare Worker backend",
+  "description": "JMail Cloudflare Worker backend",
   "main": "src/index.ts",
   "scripts": {
     "dev": "npx wrangler dev",
     "deploy": "npx wrangler deploy",
     "db:migrate": "npx wrangler d1 execute DB --local --file=./src/db/schema.sql",
     "db:migrate:prod": "npx wrangler d1 execute DB --remote --file=./src/db/schema.sql",
+    "test": "node --test",
     "tail": "npx wrangler tail"
   },
   "dependencies": {
-    "@qmail/brevo-api": "workspace:*",
-    "@qmail/cloudflare-email-api": "workspace:*",
+    "@jmail/brevo-api": "workspace:*",
+    "@jmail/cloudflare-email-api": "workspace:*",
     "@simplewebauthn/server": "^13.3.3",
     "hono": "^4.13.14",
     "postal-mime": "^2.7.6"

@@ -1,16 +1,17 @@
 {
-  "name": "qmail",
+  "name": "jmail",
   "version": "1.0.0",
   "private": true,
-  "description": "Free custom email solution using Cloudflare Email Routing and Mailgun",
+  "description": "Private mail on Cloudflare Email Routing with free-tier relay failover, plus a token-authenticated mail API for your own projects",
   "scripts": {
-    "dev": "pnpm --filter @qmail/worker dev",
-    "dev:frontend": "pnpm --filter @qmail/frontend dev",
+    "dev": "pnpm --filter @jmail/worker dev",
+    "dev:frontend": "pnpm --filter @jmail/frontend dev",
     "build": "pnpm -r build",
-    "build:frontend": "pnpm --filter @qmail/frontend build",
-    "deploy": "pnpm build && pnpm --filter @qmail/worker run deploy",
-    "db:migrate": "pnpm --filter @qmail/worker db:migrate",
-    "db:migrate:prod": "pnpm --filter @qmail/worker db:migrate:prod"
+    "build:frontend": "pnpm --filter @jmail/frontend build",
+    "deploy": "pnpm build && pnpm --filter @jmail/worker run deploy",
+    "db:migrate": "pnpm --filter @jmail/worker db:migrate",
+    "db:migrate:prod": "pnpm --filter @jmail/worker db:migrate:prod",
+    "test": "pnpm -r test"
   },
   "engines": {
     "node": ">=22.12.0"

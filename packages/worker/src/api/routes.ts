@@ -11,11 +11,14 @@ import push from './push';
 import webhooks from './webhooks';
 import contacts from './contacts';
 import folders from './folders';
+import v1 from './v1';
+import tokens from './tokens';
+import providers from './providers';
+import hooks from './hooks';
 import { RateLimiter, getClientIP } from '../lib/rate-limit';
 
 export interface Env {
   DB: D1Database;
-  JWT_SECRET?: string;
   ATTACHMENTS?: R2Bucket;
 }
 
@@ -47,8 +50,9 @@ api.use('/*', async (c, next) => {
 // same-host requests and local dev servers are allowed.
 api.use('/*', cors({
   origin: (origin, c) => {
-    // Same-origin requests don't send an Origin header
-    if (!origin) return '*';
+    // No Origin header means the caller isn't a browser making a cross-origin
+    // read — answering '*' would put that header on authenticated responses.
+    if (!origin) return null;
     try {
       const originUrl = new URL(origin);
       const requestHost = new URL(c.req.url).hostname;
@@ -65,9 +69,13 @@ api.use('/*', cors({
 }));
 
 /**
- * Rate limit middleware factory backed by D1
+ * Rate limit middleware factory backed by D1.
+ *
+ * `clearOnSuccess` matters for a single-admin box: the budget protects against
+ * brute force, and without it five *correct* logins in fifteen minutes would
+ * lock the owner out of their own mail.
  */
-function rateLimit(config: { windowMs: number; maxRequests: number; keyPrefix: string }) {
+function rateLimit(config: { windowMs: number; maxRequests: number; keyPrefix: string; clearOnSuccess?: boolean }) {
   return async (c: Context<{ Bindings: Env }>, next: Next) => {
     const rateLimiter = new RateLimiter(c.env.DB, config);
     const ip = getClientIP(c.req.raw);
@@ -86,18 +94,33 @@ function rateLimit(config: { windowMs: number; maxRequests: number; keyPrefix: s
     c.header('X-RateLimit-Remaining', String(result.remaining));
     c.header('X-RateLimit-Reset', String(Math.ceil(result.resetTime / 1000)));
 
-    return next();
+    await next();
+
+    // A successful login clears the budget, so one typo does not lock the owner
+    // out for the rest of the window.
+    if (config.clearOnSuccess && c.res.status >= 200 && c.res.status < 300) {
+      await rateLimiter.reset(ip);
+    }
   };
 }
 
-// Login attempts (password and passkey share one budget): 5 per 15 minutes
+// Login attempts (password and passkey share one budget): 5 failures per 15 minutes
 const loginRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
   maxRequests: 5,
   keyPrefix: 'login',
+  clearOnSuccess: true,
 });
 api.use('/auth/login', loginRateLimit);
 api.use('/auth/webauthn/login/verify', loginRateLimit);
+
+// Assertion options mint a stored challenge each call, so it gets its own —
+// generous — budget instead of being public and unbounded.
+api.use('/auth/webauthn/login/options', rateLimit({
+  windowMs: 15 * 60 * 1000,
+  maxRequests: 30,
+  keyPrefix: 'webauthn-options',
+}));
 
 // Setup: 3 attempts per hour
 api.use('/auth/setup', rateLimit({
@@ -111,11 +134,23 @@ api.route('/auth/webauthn', webauthn);
 api.route('/auth', auth);
 
 // Brevo delivery webhooks (secret-in-path, no session auth)
+api.use('/webhooks/*', rateLimit({ windowMs: 60 * 1000, maxRequests: 120, keyPrefix: 'inboundhook' }));
 api.route('/webhooks', webhooks);
+
+// Mail-server API for other projects. Bearer-token authenticated inside the
+// module, so it must stay outside the session middleware.
+api.route('/v1', v1);
 
 // Health check
 api.get('/health', (c) => {
-  return c.json({ status: 'ok', timestamp: new Date().toISOString() });
+  const seconds = Math.floor(Date.now() / 1000);
+  return c.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    next_utc_midnight: Math.floor(Date.UTC(
+      new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 1
+    ) / 1000) - seconds,
+  });
 });
 
 // Protected routes - require authentication
@@ -142,12 +177,18 @@ api.use('/contacts/*', async (c, next) => {
 });
 
 api.use('/folders/*', authMiddleware);
+api.use('/tokens/*', authMiddleware);
+api.use('/providers/*', authMiddleware);
+api.use('/hooks/*', authMiddleware);
 api.route('/folders', folders);
 api.route('/emails', emails);
 api.route('/settings', settings);
 api.route('/setup', setup);
 api.route('/push', push);
 api.route('/contacts', contacts);
+api.route('/tokens', tokens);
+api.route('/providers', providers);
+api.route('/hooks', hooks);
 
 // 404 handler
 api.all('*', (c) => {

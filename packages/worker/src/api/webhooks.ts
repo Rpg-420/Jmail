@@ -1,5 +1,7 @@
 import { Hono } from 'hono';
 import { DatabaseQueries } from '../db/queries';
+import { timingSafeEqual } from '../lib/utils';
+import { emitMailEvent, type WebhookEvent } from '../lib/webhooks-out';
 
 export interface Env {
   DB: D1Database;
@@ -25,6 +27,14 @@ const STATUS_MAP: Record<string, string> = {
   error: 'failed',
 };
 
+const STATUS_EVENTS: Record<string, WebhookEvent> = {
+  delivered: 'delivered',
+  opened: 'opened',
+  bounced: 'bounced',
+  deferred: 'deferred',
+  failed: 'failed',
+};
+
 // Later statuses must not be downgraded by out-of-order webhook delivery
 const STATUS_RANK: Record<string, number> = {
   queued: 0,
@@ -42,15 +52,16 @@ webhooks.post('/brevo/:secret', async (c) => {
 
   try {
     const expected = await db.getSetting('brevo_webhook_secret');
-    if (!expected || c.req.param('secret') !== expected) {
+    const provided = c.req.param('secret') ?? '';
+    if (!expected || !timingSafeEqual(provided, expected)) {
       return c.json({ error: 'Not found' }, 404);
     }
 
-    const payload = await c.req.json<{ event?: string; 'message-id'?: string }>();
+    const payload = await c.req.json<{ event?: string; 'message-id'?: string; email?: string; id?: string }>();
     const event = payload.event;
     const messageId = payload['message-id'];
 
-    if (!event || !messageId) {
+    if (!event || !messageId || messageId.length > 512) {
       return c.json({ success: true, ignored: true });
     }
 
@@ -60,11 +71,25 @@ webhooks.post('/brevo/:secret', async (c) => {
     }
 
     // Only move status forward
-    const email = await db.getEmailByBrevoMessageId(messageId);
+    const email = await db.getEmailByProviderMessageId(messageId);
     if (email) {
       const currentRank = STATUS_RANK[email.delivery_status || 'queued'] ?? 0;
       if ((STATUS_RANK[status] ?? 0) >= currentRank) {
         await db.updateDeliveryStatus(messageId, status);
+
+        const outboundEvent = STATUS_EVENTS[status];
+        if (outboundEvent) {
+          await emitMailEvent(db, outboundEvent, {
+            id: email.id,
+            to: email.to_address,
+            recipient: payload.email ?? null,
+            subject: email.subject,
+            provider: email.provider,
+            provider_message_id: messageId,
+            status,
+            token_id: email.token_id,
+          });
+        }
       }
     }
 

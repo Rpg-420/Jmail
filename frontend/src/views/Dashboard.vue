@@ -182,11 +182,11 @@ function openEmail(id: string) {
               </dd>
             </div>
             <div class="flex items-center justify-between">
-              <dt class="text-sm text-ink-2">Sending <span class="text-ink-3">· Brevo</span></dt>
-              <dd class="flex items-center gap-1.5 text-sm" :class="setupStatus?.brevo.configured ? 'text-success' : 'text-ink-3'">
-                <svg v-if="setupStatus?.brevo.configured" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
+              <dt class="text-sm text-ink-2">Sending <span class="text-ink-3">· {{ setupStatus?.relays.connected.map(r => r.label).join(', ') || 'no relay yet' }}</span></dt>
+              <dd class="flex items-center gap-1.5 text-sm" :class="setupStatus?.relays.configured ? 'text-success' : 'text-ink-3'">
+                <svg v-if="setupStatus?.relays.configured" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>
                 <svg v-else class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
-                {{ setupStatus?.brevo.configured ? 'Connected' : 'Not set up' }}
+                {{ setupStatus?.relays.configured ? 'Connected' : 'Not set up' }}
               </dd>
             </div>
             <div v-if="setupStatus?.domain" class="flex items-center justify-between pt-3 border-t border-edge">

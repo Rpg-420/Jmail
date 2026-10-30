@@ -40,7 +40,10 @@ export interface Email {
   thread_id: string | null;
   delivery_status: string | null;
   scheduled_at: string | null;
-  mailgun_id: string | null;
+  provider_message_id: string | null;
+  provider?: string | null;
+  attempts?: number;
+  last_error?: string | null;
   created_at: string;
   attachment_count?: number;
   attachments?: Attachment[];
@@ -109,8 +112,9 @@ export interface SetupStatus {
     configured: boolean;
     zoneId: string | null;
   };
-  brevo: {
+  relays: {
     configured: boolean;
+    connected: { id: string; label: string }[];
   };
 }
 
@@ -118,6 +122,7 @@ export interface AuthStatus {
   authenticated: boolean;
   needsSetup: boolean;
   hasPasskeys: boolean;
+  requiresSetupCode?: boolean;
 }
 
 export interface LoginResponse {
@@ -160,3 +165,68 @@ export interface BrevoSetupResponse {
   };
   message: string;
 }
+
+// ==================== Mail server ====================
+
+export interface ApiToken {
+  id: string;
+  name: string;
+  prefix: string;
+  scopes: string[];
+  identity_address: string | null;
+  rate_per_min: number;
+  daily_budget: number;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  sent_today: number;
+  failed_today: number;
+}
+
+export interface CreateTokenResponse {
+  token: ApiToken;
+  secret: string;
+  warning: string;
+}
+
+export interface ProviderInfo {
+  id: string;
+  label: string;
+  configured: boolean;
+  quota_day: number | null;
+  quota_month: number | null;
+  used_day: number;
+  used_month: number;
+  remaining_day: number | null;
+  max_recipients: number;
+  max_message_mb: number;
+}
+
+export interface ProvidersResponse {
+  providers: ProviderInfo[];
+  total_remaining_today: number;
+  queue: Record<string, number>;
+  history: Array<{ provider: string; period: string; used: number }>;
+}
+
+export interface WebhookEndpointInfo {
+  id: string;
+  url: string;
+  events: string[];
+  token_id: string | null;
+  active: boolean;
+  created_at: string;
+  secret: string;
+}
+
+export interface WebhookDeliveryInfo {
+  id: string;
+  event: string;
+  status: 'pending' | 'delivered' | 'failed';
+  attempts: number;
+  last_error: string | null;
+  created_at: string;
+  next_attempt_at: string | null;
+  delivered_at: string | null;
+}
+

@@ -54,16 +54,16 @@ export async function notifyTelegram(db: DatabaseQueries, email: {
     const token = await db.getSetting('telegram_bot_token') || '';
     const chatId = await db.getSetting('telegram_chat_id') || '';
     // Bound delivery work for exceptionally large emails; the complete email stays in the inbox.
-    const body = email.text || '(No plain-text body. Open Qmail to view the HTML email.)';
-    const excerpt = body.length > 24000 ? `${body.slice(0, 24000)}\n\n[Message shortened. Read the full email in Qmail.]` : body;
+    const body = email.text || '(No plain-text body. Open JMail to view the HTML email.)';
+    const excerpt = body.length > 24000 ? `${body.slice(0, 24000)}\n\n[Message shortened. Read the full email in JMail.]` : body;
     await sendTelegramMessage(token, chatId,
-      `New email · Qmail\nFrom: ${email.from.slice(0, 320)}\nTo: ${email.to.slice(0, 320)}\nSubject: ${email.subject.slice(0, 500)}\nAttachments: ${email.attachmentCount} (available in Qmail)\n\n${excerpt}`);
+      `New email · JMail\nFrom: ${email.from.slice(0, 320)}\nTo: ${email.to.slice(0, 320)}\nSubject: ${email.subject.slice(0, 500)}\nAttachments: ${email.attachmentCount} (available in JMail)\n\n${excerpt}`);
     await db.setSetting('telegram_last_delivery', new Date().toISOString());
     await db.setSetting('telegram_last_error', '');
   } catch (error) {
     // Delivery is best-effort and must never reject an already stored email.
     const safeError = error instanceof Error && !error.message.includes('https:') ? error.message : 'Telegram notification failed.';
     try { await db.setSetting('telegram_last_error', safeError); } catch { /* Mail storage must remain independent. */ }
-    console.warn('Telegram notification failed; email remains available in Qmail.');
+    console.warn('Telegram notification failed; email remains available in JMail.');
   }
 }

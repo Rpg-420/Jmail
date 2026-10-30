@@ -1,8 +1,8 @@
-/* Qmail service worker: PWA shell + push notifications.
+/* JMail service worker: PWA shell + push notifications.
    Pushes arrive without a payload by design (no mail content ever
    transits the push service), so the notification is generic. */
 
-const OFFLINE_CACHE = 'qmail-offline-v1';
+const OFFLINE_CACHE = 'jmail-offline-v1';
 const OFFLINE_URL = '/offline.html';
 
 self.addEventListener('install', (event) => {
@@ -14,7 +14,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((key) => key.startsWith('qmail-offline-') && key !== OFFLINE_CACHE).map((key) => caches.delete(key)));
+    await Promise.all(keys.filter((key) => key.startsWith('jmail-offline-') && key !== OFFLINE_CACHE).map((key) => caches.delete(key)));
     await self.clients.claim();
   })());
 });
@@ -27,7 +27,7 @@ self.addEventListener('fetch', (event) => {
       url.pathname === '/api' || url.pathname.startsWith('/api/') || event.request.mode !== 'navigate') return;
   event.respondWith(fetch(event.request).catch(async () => {
     const offline = await caches.match(OFFLINE_URL, { cacheName: OFFLINE_CACHE });
-    return offline || new Response('Qmail is offline. Reconnect and try again.', {
+    return offline || new Response('JMail is offline. Reconnect and try again.', {
       status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     });
   }));
@@ -35,11 +35,11 @@ self.addEventListener('fetch', (event) => {
 
 self.addEventListener('push', (event) => {
   event.waitUntil(
-    self.registration.showNotification('Qmail', {
+    self.registration.showNotification('JMail', {
       body: 'You have new mail.',
       icon: '/icon-192.png',
       badge: '/icon-192.png',
-      tag: 'qmail-new-mail',
+      tag: 'jmail-new-mail',
     })
   );
 });

@@ -142,7 +142,7 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 /**
  * Timing-safe string comparison to prevent timing attacks
  */
-function timingSafeEqual(a: string, b: string): boolean {
+export function timingSafeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) {
     return false;
   }
@@ -154,22 +154,10 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 /**
- * Create a simple JWT-like token
+ * HMAC-SHA256 signature, hex encoded. Used to sign outbound webhook payloads
+ * so a receiving project can prove the call came from this mail server.
  */
-export async function createToken(
-  payload: Record<string, unknown>,
-  secret: string,
-  expiresIn = 7 * 24 * 60 * 60 * 1000 // 7 days in ms
-): Promise<string> {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const now = Date.now();
-  const exp = now + expiresIn;
-
-  const fullPayload = { ...payload, iat: now, exp };
-
-  const encodedHeader = btoa(JSON.stringify(header));
-  const encodedPayload = btoa(JSON.stringify(fullPayload));
-
+export async function hmacSha256Hex(secret: string, message: string): Promise<string> {
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
     'raw',
@@ -178,72 +166,6 @@ export async function createToken(
     false,
     ['sign']
   );
-
-  const signatureData = encoder.encode(`${encodedHeader}.${encodedPayload}`);
-  const signature = await crypto.subtle.sign('HMAC', key, signatureData);
-  const encodedSignature = btoa(String.fromCharCode(...new Uint8Array(signature)));
-
-  return `${encodedHeader}.${encodedPayload}.${encodedSignature}`;
-}
-
-/**
- * Verify and decode a token
- */
-export async function verifyToken(
-  token: string,
-  secret: string
-): Promise<Record<string, unknown> | null> {
-  try {
-    const parts = token.split('.');
-    if (parts.length !== 3) return null;
-
-    const [encodedHeader, encodedPayload, encodedSignature] = parts;
-
-    // Verify signature
-    const encoder = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      'raw',
-      encoder.encode(secret),
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['verify']
-    );
-
-    const signatureData = encoder.encode(`${encodedHeader}.${encodedPayload}`);
-    const signature = Uint8Array.from(atob(encodedSignature), c => c.charCodeAt(0));
-    const valid = await crypto.subtle.verify('HMAC', key, signature, signatureData);
-
-    if (!valid) return null;
-
-    // Decode payload
-    const payload = JSON.parse(atob(encodedPayload));
-
-    // Check expiration
-    if (payload.exp && payload.exp < Date.now()) {
-      return null;
-    }
-
-    return payload;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Format date for display
- */
-export function formatDate(date: string | Date): string {
-  const d = typeof date === 'string' ? new Date(date) : date;
-  return d.toISOString();
-}
-
-/**
- * Sanitize HTML to prevent XSS
- */
-export function sanitizeHtml(html: string): string {
-  // Basic sanitization - in production use a proper library like DOMPurify
-  return html
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/javascript:/gi, '')
-    .replace(/on\w+=/gi, '');
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(message));
+  return Array.from(new Uint8Array(signature), b => b.toString(16).padStart(2, '0')).join('');
 }

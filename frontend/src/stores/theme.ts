@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 
 export type ThemePreference = 'light' | 'dark' | 'system';
 
-const STORAGE_KEY = 'qmail_theme';
+const STORAGE_KEY = 'jmail_theme';
 
 function systemPrefersDark(): boolean {
   return window.matchMedia('(prefers-color-scheme: dark)').matches;

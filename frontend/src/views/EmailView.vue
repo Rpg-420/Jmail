@@ -72,9 +72,10 @@ const sanitizedHtml = computed(() => {
         blocked = true;
       }
     }
-    // Strip CSS that loads remote resources
+    // Strip CSS that loads remote resources. `image-set()` is matched on its own
+    // because its argument may be a bare string with no url() inside.
     const style = node.getAttribute?.('style');
-    if (style && /url\s*\(/i.test(style)) {
+    if (style && (/url\s*\(/i.test(style) || /image-set\s*\(/i.test(style))) {
       node.removeAttribute('style');
       blocked = true;
     }

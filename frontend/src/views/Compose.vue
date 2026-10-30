@@ -203,6 +203,11 @@ async function sendEmail() {
       forwardOfEmailId: forwardOfEmailId.value || undefined,
     });
 
+    if (result.queued) {
+      // Every relay was at quota or down; the mail server keeps retrying.
+      router.push({ name: 'drafts', query: { queued: '1' } });
+      return;
+    }
     router.push({ name: result.scheduled ? 'drafts' : 'sent' });
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to send email';

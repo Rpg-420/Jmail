@@ -11,6 +11,11 @@ import type {
   LoginResponse,
   CloudflareSetupResponse,
   BrevoSetupResponse,
+  ApiToken,
+  CreateTokenResponse,
+  ProvidersResponse,
+  WebhookEndpointInfo,
+  WebhookDeliveryInfo,
 } from './types';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
@@ -25,15 +30,15 @@ class ApiClient {
   private token: string | null = null;
 
   constructor() {
-    this.token = localStorage.getItem('qmail_token');
+    this.token = localStorage.getItem('jmail_token');
   }
 
   setToken(token: string | null) {
     this.token = token;
     if (token) {
-      localStorage.setItem('qmail_token', token);
+      localStorage.setItem('jmail_token', token);
     } else {
-      localStorage.removeItem('qmail_token');
+      localStorage.removeItem('jmail_token');
     }
   }
 
@@ -60,13 +65,23 @@ class ApiClient {
       body: body ? JSON.stringify(body) : undefined,
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || 'Request failed');
+    // A proxy or cold worker can answer with HTML; parsing that as JSON threw
+    // a SyntaxError and hid the real failure from the user.
+    const text = await response.text();
+    let data: Record<string, unknown> = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { error: `Unexpected response from the server (HTTP ${response.status})` };
     }
 
-    return data;
+    if (!response.ok) {
+      const message = (data.error as string) || `Request failed (${response.status})`;
+      const details = data.details || data.message;
+      throw new Error(typeof details === 'string' && details ? `${message} — ${details}` : message);
+    }
+
+    return data as T;
   }
 
   // Auth endpoints
@@ -87,15 +102,15 @@ class ApiClient {
     this.setToken(null);
   }
 
-  async setup(password: string): Promise<LoginResponse> {
-    const response = await this.request<LoginResponse>('POST', '/auth/setup', { password });
+  async setup(password: string, setupCode?: string): Promise<LoginResponse> {
+    const response = await this.request<LoginResponse>('POST', '/auth/setup', { password, setupCode });
     if (response.token) {
       this.setToken(response.token);
     }
     return response;
   }
 
-  async changePassword(currentPassword: string, newPassword: string): Promise<{ success: boolean }> {
+  async changePassword(currentPassword: string, newPassword: string): Promise<{ success: boolean; reauth_required?: boolean }> {
     return this.request('POST', '/auth/change-password', {
       currentPassword,
       newPassword,
@@ -234,7 +249,7 @@ class ApiClient {
   }
 
   async downloadMbox(): Promise<void> {
-    await this.downloadBlob('/emails/export/mbox', 'qmail-export.mbox');
+    await this.downloadBlob('/emails/export/mbox', 'jmail-export.mbox');
   }
 
   // Contact endpoints
@@ -297,7 +312,7 @@ class ApiClient {
     scheduleAt?: string;
     replyToEmailId?: string;
     forwardOfEmailId?: string;
-  }): Promise<{ success: boolean; id: string; messageId?: string; scheduled?: boolean }> {
+  }): Promise<{ success: boolean; id: string; messageId?: string; scheduled?: boolean; queued?: boolean; provider?: string; details?: string }> {
     return this.request('POST', '/emails/send', data);
   }
 
@@ -381,6 +396,87 @@ class ApiClient {
 
   async deleteAddress(id: string): Promise<{ success: boolean }> {
     return this.request('DELETE', `/setup/addresses/${id}`);
+  }
+
+  // ==================== Mail server: providers ====================
+
+  async getProviders(): Promise<ProvidersResponse> {
+    return this.request('GET', '/providers');
+  }
+
+  async saveProviderKey(id: string, apiKey: string): Promise<{ success: boolean; configured: boolean }> {
+    return this.request('PUT', `/providers/${id}/key`, { apiKey });
+  }
+
+  async saveProviderQuota(id: string, quota: { day?: number | null; month?: number | null }): Promise<{ success: boolean }> {
+    return this.request('PUT', `/providers/${id}/quota`, quota);
+  }
+
+  async saveProviderOrder(order: string[]): Promise<{ success: boolean; order: string[] }> {
+    return this.request('PUT', '/providers/order', { order });
+  }
+
+  // ==================== Mail server: API tokens ====================
+
+  async getApiTokens(): Promise<{ tokens: ApiToken[] }> {
+    return this.request('GET', '/tokens');
+  }
+
+  async createApiToken(data: {
+    name: string;
+    scopes?: string[];
+    identity_address?: string | null;
+    rate_per_min?: number;
+    daily_budget?: number;
+  }): Promise<CreateTokenResponse> {
+    return this.request('POST', '/tokens', data);
+  }
+
+  async updateApiToken(id: string, data: Partial<ApiToken>): Promise<{ success: boolean; token: ApiToken }> {
+    return this.request('PUT', `/tokens/${encodeURIComponent(id)}`, data);
+  }
+
+  async revokeApiToken(id: string): Promise<{ success: boolean }> {
+    return this.request('POST', `/tokens/${encodeURIComponent(id)}/revoke`);
+  }
+
+  async getApiTokenUsage(id: string, days = 14): Promise<{
+    token: ApiToken;
+    days: number;
+    history: Array<{ day: string; sent: number; failed: number }>;
+    totals: { sent: number; failed: number };
+  }> {
+    return this.request('GET', `/tokens/${encodeURIComponent(id)}/usage?days=${days}`);
+  }
+
+  // ==================== Mail server: outbound webhooks ====================
+
+  async getWebhooks(): Promise<{ endpoints: WebhookEndpointInfo[]; events: string[] }> {
+    return this.request('GET', '/hooks');
+  }
+
+  async createWebhook(data: { url: string; events: string[]; token_id?: string | null }): Promise<{ success: boolean; endpoint: WebhookEndpointInfo; warning: string }> {
+    return this.request('POST', '/hooks', data);
+  }
+
+  async updateWebhook(id: string, data: { url?: string; events?: string[]; active?: boolean }): Promise<{ success: boolean }> {
+    return this.request('PUT', `/hooks/${encodeURIComponent(id)}`, data);
+  }
+
+  async rotateWebhookSecret(id: string): Promise<{ success: boolean; secret: string }> {
+    return this.request('POST', `/hooks/${encodeURIComponent(id)}/rotate-secret`);
+  }
+
+  async deleteWebhook(id: string): Promise<{ success: boolean }> {
+    return this.request('DELETE', `/hooks/${encodeURIComponent(id)}`);
+  }
+
+  async testWebhook(id: string): Promise<{ success: boolean; status: string; last_error: string | null }> {
+    return this.request('POST', `/hooks/${encodeURIComponent(id)}/test`);
+  }
+
+  async getWebhookDeliveries(id: string): Promise<{ deliveries: WebhookDeliveryInfo[] }> {
+    return this.request('GET', `/hooks/${encodeURIComponent(id)}/deliveries`);
   }
 }
 

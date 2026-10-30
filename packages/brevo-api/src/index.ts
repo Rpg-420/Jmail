@@ -68,8 +68,4 @@ export class BrevoAPI {
   }
 }
 
-// Keep backward compatibility aliases
-export { BrevoAPI as MailtrapAPI };
-export { BrevoAPI as MailgunAPI };
-
 export default BrevoAPI;

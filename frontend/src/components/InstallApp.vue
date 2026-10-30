@@ -49,7 +49,7 @@ onUnmounted(() => {
   <div v-if="!installed">
     <button type="button" class="btn btn-ghost w-full" :disabled="installing" @click="install">
       <svg aria-hidden="true" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v12m-4-4 4 4 4-4M5 16v4h14v-4" /></svg>
-      {{ installing ? 'Opening...' : 'Install Qmail' }}
+      {{ installing ? 'Opening...' : 'Install JMail' }}
     </button>
     <p v-if="message" role="status" class="hint">{{ message }}</p>
   </div>

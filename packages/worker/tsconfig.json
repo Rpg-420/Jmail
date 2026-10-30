@@ -13,8 +13,8 @@
     "isolatedModules": true,
     "allowSyntheticDefaultImports": true,
     "paths": {
-      "@qmail/brevo-api": ["../brevo-api/src/index.ts"],
-      "@qmail/cloudflare-email-api": ["../cloudflare-email-api/src/index.ts"]
+      "@jmail/brevo-api": ["../brevo-api/src/index.ts"],
+      "@jmail/cloudflare-email-api": ["../cloudflare-email-api/src/index.ts"]
     }
   },
   "include": ["src/**/*"],

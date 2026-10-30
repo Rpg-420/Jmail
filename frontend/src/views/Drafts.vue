@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { computed, onMounted, ref } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import api from '@/api/client';
 import type { Email } from '@/api/types';
 
 const router = useRouter();
+const route = useRoute();
 const drafts = ref<Email[]>([]);
 const scheduled = ref<Email[]>([]);
 const isLoading = ref(true);
+
+// Set when a send found every relay at quota and was handed to the queue.
+const wasQueued = computed(() => route.query.queued === '1');
 
 async function load() {
   isLoading.value = true;
@@ -39,6 +43,25 @@ async function deleteDraft(event: Event, id: string) {
 function formatDate(dateStr: string): string {
   return new Date(dateStr.includes('T') ? dateStr : `${dateStr.replace(' ', 'T')}Z`).toLocaleString();
 }
+
+function queueLabel(email: Email): string {
+  switch (email.delivery_status) {
+    case 'failed':
+      return 'Failed';
+    case 'deferred':
+      return 'Waiting for relay capacity';
+    case 'queued':
+      return 'Retrying now';
+    default:
+      return `Sends ${formatDate(email.scheduled_at || email.created_at)}`;
+  }
+}
+
+function queueTone(email: Email): string {
+  if (email.delivery_status === 'failed') return 'bg-danger-soft text-danger';
+  if (email.delivery_status === 'queued' || email.delivery_status === 'deferred') return 'bg-warning-soft text-warning';
+  return 'bg-accent-soft text-accent';
+}
 </script>
 
 <template>
@@ -50,11 +73,16 @@ function formatDate(dateStr: string): string {
     </div>
 
     <template v-else>
+      <div v-if="wasQueued" class="alert-success mb-6 flex items-start justify-between gap-3">
+        <span>Every sending relay was busy, so JMail keeps retrying this message. It leaves the queue on its own — you don't need to do anything.</span>
+        <button class="text-xs underline shrink-0" @click="router.replace({ name: 'drafts' })">Dismiss</button>
+      </div>
+
       <!-- Scheduled queue -->
       <div v-if="scheduled.length > 0" class="card overflow-hidden mb-6">
         <div class="px-6 pt-5 pb-3">
-          <h2 class="text-base font-semibold text-ink">Scheduled</h2>
-          <p class="text-xs text-ink-3">Sent automatically at the scheduled time</p>
+          <h2 class="text-base font-semibold text-ink">Scheduled &amp; queued</h2>
+          <p class="text-xs text-ink-3">Sent automatically at the scheduled time, or as soon as a relay has capacity</p>
         </div>
         <ul class="divide-y divide-edge">
           <li
@@ -66,14 +94,10 @@ function formatDate(dateStr: string): string {
             <div class="min-w-0">
               <p class="text-sm text-ink truncate">To: {{ email.to_address || '(no recipient)' }}</p>
               <p class="text-sm text-ink-2 truncate">{{ email.subject || '(No Subject)' }}</p>
+              <p v-if="email.last_error" class="text-xs text-ink-3 truncate">{{ email.last_error }}</p>
             </div>
             <div class="flex items-center gap-3 flex-shrink-0">
-              <span
-                class="badge"
-                :class="email.delivery_status === 'failed' ? 'bg-danger-soft text-danger' : 'bg-accent-soft text-accent'"
-              >
-                {{ email.delivery_status === 'failed' ? 'Failed' : `Sends ${formatDate(email.scheduled_at || email.created_at)}` }}
-              </span>
+              <span class="badge" :class="queueTone(email)">{{ queueLabel(email) }}</span>
               <button class="text-danger hover:opacity-80 text-sm" @click="(e) => deleteDraft(e, email.id)">Delete</button>
             </div>
           </li>

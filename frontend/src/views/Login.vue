@@ -8,6 +8,7 @@ const authStore = useAuthStore();
 
 const password = ref('');
 const confirmPassword = ref('');
+const setupCode = ref('');
 const error = ref('');
 const isLoading = ref(false);
 const isPasskeyLoading = ref(false);
@@ -38,7 +39,7 @@ async function handleSubmit() {
 
   try {
     if (isSetupMode.value) {
-      await authStore.setup(password.value);
+      await authStore.setup(password.value, setupCode.value || undefined);
       router.push({ name: 'setup' });
     } else {
       await authStore.login(password.value);
@@ -77,7 +78,7 @@ async function handlePasskeyLogin() {
           <img src="/favicon.svg" alt="" class="h-full w-full" />
         </div>
         <h1 class="mt-6 font-display text-3xl text-ink">
-          {{ isSetupMode ? 'Welcome to Qmail' : 'Qmail' }}
+          {{ isSetupMode ? 'Welcome to JMail' : 'JMail' }}
         </h1>
         <p class="mt-2 text-sm text-ink-2">
           {{ isSetupMode ? 'Create your admin password to get started' : 'Sign in to your mailbox' }}
@@ -132,6 +133,20 @@ async function handlePasskeyLogin() {
               class="input"
               placeholder="Confirm your password"
             />
+          </div>
+
+          <div v-if="isSetupMode && authStore.requiresSetupCode">
+            <label for="setupCode" class="label">Setup code</label>
+            <input
+              id="setupCode"
+              v-model="setupCode"
+              type="password"
+              required
+              autocomplete="off"
+              class="input"
+              placeholder="The SETUP_CODE secret from your deploy"
+            />
+            <p class="hint">This deployment protects first-run setup so a stranger cannot claim the mailbox.</p>
           </div>
 
           <div v-if="error" class="alert-error">{{ error }}</div>

@@ -312,7 +312,14 @@ async function changePassword() {
 
   isSaving.value = true;
   try {
-    await api.changePassword(currentPassword.value, newPassword.value);
+    const result = await api.changePassword(currentPassword.value, newPassword.value);
+    if (result.reauth_required) {
+      // Every session was revoked server-side; a stale token only causes
+      // confusing 401s, so send the user straight back to the sign-in page.
+      await authStore.logout();
+      window.location.href = '/login';
+      return;
+    }
     currentPassword.value = '';
     newPassword.value = '';
     confirmPassword.value = '';
@@ -406,7 +413,7 @@ function formatDate(dateStr: string): string {
 
       <!-- Complete setup banner -->
       <div
-        v-if="setupStatus?.cloudflare.configured && setupStatus?.brevo.configured && !setupStatus?.setupCompleted"
+        v-if="setupStatus?.cloudflare.configured && setupStatus?.relays.configured && !setupStatus?.setupCompleted"
         class="card mb-6 p-4 bg-accent-soft border-accent"
       >
         <div class="flex items-center justify-between">
@@ -456,7 +463,7 @@ function formatDate(dateStr: string): string {
           <div><label for="telegram-chat" class="label">Recipient's numeric user ID</label>
             <input id="telegram-chat" v-model="telegramChatId" type="text" inputmode="numeric" pattern="[1-9][0-9]{0,15}" placeholder="123456789" class="input" />
           </div>
-          <label class="flex items-start gap-3 text-sm"><input v-model="telegramEnabled" type="checkbox" class="mt-1 h-4 w-4 accent-[var(--c-accent)]" /><span><strong class="block font-medium">Forward incoming emails to Telegram</strong><span class="text-ink-2">Sender, recipient, subject and plain-text content will be shared with Telegram. Attachments stay in Qmail; very long emails are shortened.</span></span></label>
+          <label class="flex items-start gap-3 text-sm"><input v-model="telegramEnabled" type="checkbox" class="mt-1 h-4 w-4 accent-[var(--c-accent)]" /><span><strong class="block font-medium">Forward incoming emails to Telegram</strong><span class="text-ink-2">Sender, recipient, subject and plain-text content will be shared with Telegram. Attachments stay in JMail; very long emails are shortened.</span></span></label>
           <div class="flex flex-wrap gap-3 pt-2"><button class="btn btn-primary" type="submit" :disabled="isSaving || isTestingTelegram">{{ isSaving ? 'Saving…' : 'Save Telegram settings' }}</button>
             <button class="btn btn-ghost" type="button" :disabled="isSaving || isTestingTelegram || !settings?.telegram_bot_token || !!telegramToken || telegramChatId !== settings?.telegram_chat_id" @click="testTelegram">{{ isTestingTelegram ? 'Sending…' : 'Send test message' }}</button></div>
           <p class="hint">The test uses saved settings. Save any changes first. Disable forwarding and save to pause delivery.</p>
@@ -541,7 +548,7 @@ function formatDate(dateStr: string): string {
       <div v-if="activeTab === 'brevo'" class="card p-6">
         <h2 class="text-lg font-semibold text-ink mb-4">Brevo (sending)</h2>
 
-        <div v-if="setupStatus?.brevo.configured" class="mb-4 p-4 bg-success-soft rounded-lg">
+        <div v-if="setupStatus?.relays.connected.some(r => r.id === 'brevo')" class="mb-4 p-4 bg-success-soft rounded-lg">
           <p class="text-sm text-success">Brevo is connected</p>
         </div>
 

@@ -2,12 +2,16 @@ import { Hono } from 'hono';
 import { DatabaseQueries, Email, EmailType } from '../db/queries';
 import { generateId, sanitizeFilename, contentDispositionAttachment, sqliteDateTime } from '../lib/utils';
 import { isValidEmail, isAllowedContentType } from '../lib/validation';
-import { deliverStoredEmail, parseEmailAddress, recordRecipientsAsContacts } from '../lib/mailer';
+import { deliverStoredEmail, parseEmailAddress, recordRecipientsAsContacts, sendRetryDeadline } from '../lib/mailer';
+import { QuotaExhaustedError, TransientSendError } from '../lib/providers/types';
+import { emitMailEvent } from '../lib/webhooks-out';
 import {
   storeAttachment,
   loadAttachmentBytes,
   loadAttachmentBase64,
   deleteAttachmentObjects,
+  base64ToBytes,
+  validateOutgoingAttachments,
 } from '../lib/attachments';
 import { buildEml, mboxSeparator } from '../lib/eml';
 
@@ -19,22 +23,6 @@ export interface Env {
 const MAX_UPLOAD_ATTACHMENT_SIZE = 5 * 1024 * 1024;  // 5MB per file over the JSON API
 const MAX_TOTAL_ATTACHMENT_SIZE = 10 * 1024 * 1024;  // 10MB per email
 const MAX_ATTACHMENT_COUNT = 10;
-
-const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
-
-function base64ByteLength(content: string): number {
-  const padding = content.endsWith('==') ? 2 : content.endsWith('=') ? 1 : 0;
-  return Math.floor((content.length * 3) / 4) - padding;
-}
-
-function base64ToBytes(content: string): Uint8Array {
-  const binary = atob(content);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
 
 interface OutgoingAttachment {
   filename: string;
@@ -70,31 +58,14 @@ function validateSendRequest(body: SendRequest): string | null {
       return `Invalid ${field} address`;
     }
   }
-  if (body.attachments) {
-    if (body.attachments.length > MAX_ATTACHMENT_COUNT) {
-      return `Too many attachments (max ${MAX_ATTACHMENT_COUNT})`;
-    }
-    let totalSize = 0;
-    for (const att of body.attachments) {
-      if (!att.filename || typeof att.content !== 'string') {
-        return 'Invalid attachment';
-      }
-      if (att.content.length % 4 !== 0 || !BASE64_PATTERN.test(att.content)) {
-        return `Attachment "${att.filename}" is not valid base64`;
-      }
-      if (att.contentType && !isAllowedContentType(att.contentType)) {
-        return `Attachment type not allowed: ${att.contentType}`;
-      }
-      const size = base64ByteLength(att.content);
-      if (size > MAX_UPLOAD_ATTACHMENT_SIZE) {
-        return `Attachment "${att.filename}" exceeds 5MB`;
-      }
-      totalSize += size;
-    }
-    if (totalSize > MAX_TOTAL_ATTACHMENT_SIZE) {
-      return 'Total attachment size exceeds 10MB';
-    }
-  }
+  const attachmentError = body.attachments
+    ? validateOutgoingAttachments(
+        body.attachments,
+        { perFile: MAX_UPLOAD_ATTACHMENT_SIZE, total: MAX_TOTAL_ATTACHMENT_SIZE, count: MAX_ATTACHMENT_COUNT },
+        isAllowedContentType
+      )
+    : null;
+  if (attachmentError) return attachmentError;
   return null;
 }
 
@@ -250,7 +221,7 @@ emails.get('/export/mbox', async (c) => {
     return new Response(parts.join(''), {
       headers: {
         'Content-Type': 'application/mbox',
-        'Content-Disposition': 'attachment; filename="qmail-export.mbox"',
+        'Content-Disposition': 'attachment; filename="jmail-export.mbox"',
         'X-Content-Type-Options': 'nosniff',
       },
     });
@@ -310,7 +281,7 @@ emails.post('/drafts', async (c) => {
       raw_size: null,
       is_read: 1,
       is_starred: 0,
-      mailgun_id: null,
+      provider_message_id: null,
     });
 
     return c.json({ success: true, id });
@@ -537,7 +508,7 @@ emails.post('/send', async (c) => {
         is_starred: 0,
         in_reply_to: inReplyTo,
         thread_id: threadId,
-        mailgun_id: null,
+        provider_message_id: null,
       });
     }
 
@@ -583,14 +554,29 @@ emails.post('/send', async (c) => {
     }
 
     try {
-      const messageId = await deliverStoredEmail(db, c.env.ATTACHMENTS, email);
-      await db.markEmailSent(emailId, messageId || null);
+      const outcome = await deliverStoredEmail(db, c.env.ATTACHMENTS, email);
+      await db.markEmailSent(emailId, outcome.providerMessageId, outcome.provider);
       await recordRecipientsAsContacts(db, email);
-      return c.json({ success: true, id: emailId, messageId });
+      await emitMailEvent(db, 'sent', {
+        id: emailId,
+        to: email.to_address,
+        subject: email.subject,
+        provider: outcome.provider,
+        provider_message_id: outcome.providerMessageId,
+        token_id: null,
+      });
+      return c.json({ success: true, id: emailId, messageId: outcome.providerMessageId, provider: outcome.provider });
     } catch (sendError) {
-      // Keep the content: demote to a failed draft instead of losing it
-      await db.markSendFailed(emailId);
       const details = sendError instanceof Error ? sendError.message : 'Unknown error';
+
+      // Quota or a relay outage is temporary: the cron keeps retrying the row.
+      if (sendError instanceof QuotaExhaustedError || sendError instanceof TransientSendError) {
+        await db.requeueEmail(emailId, sendRetryDeadline(1), details);
+        return c.json({ success: true, queued: true, id: emailId, details }, 202);
+      }
+
+      // The relay rejected the message itself: keep the content as a draft.
+      await db.markSendFailed(emailId);
       return c.json({ error: 'Failed to send email — saved as draft', details }, 500);
     }
   } catch (error) {

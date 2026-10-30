@@ -1,5 +1,5 @@
 {
-  "name": "@qmail/brevo-api",
+  "name": "@jmail/brevo-api",
   "version": "1.0.0",
   "description": "Brevo API wrapper for sending emails",
   "main": "dist/index.js",

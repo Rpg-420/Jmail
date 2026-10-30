@@ -44,15 +44,19 @@ function getRpContext(c: { req: { url: string; header: (name: string) => string 
   const rpID = url.hostname;
   const expectedOrigin: string[] = [url.origin];
 
-  // In dev the SPA runs on a different port (Vite) than the worker;
-  // accept the browser origin only when it points at the same host or localhost.
+  // In dev the SPA runs on a different port (Vite) than the worker, so the
+  // browser origin differs from the worker origin. Widening is only allowed
+  // while the worker itself is a loopback host — a deployed JMail must accept
+  // exactly the origin it is served from, or a locally-run app could complete
+  // a ceremony against the production rpID.
+  const workerIsLocal = ['localhost', '127.0.0.1'].includes(url.hostname);
   const originHeader = c.req.header('Origin');
   if (originHeader) {
     try {
       const originUrl = new URL(originHeader);
       const isSameHost = originUrl.hostname === rpID;
-      const isLocalDev = ['localhost', '127.0.0.1'].includes(originUrl.hostname);
-      if ((isSameHost || isLocalDev) && !expectedOrigin.includes(originUrl.origin)) {
+      const isLocalPair = workerIsLocal && ['localhost', '127.0.0.1'].includes(originUrl.hostname);
+      if ((isSameHost || isLocalPair) && !expectedOrigin.includes(originUrl.origin)) {
         expectedOrigin.push(originUrl.origin);
       }
     } catch {
@@ -147,11 +151,11 @@ webauthn.post('/register/options', async (c) => {
     const existing = await db.listCredentials();
 
     const options = await generateRegistrationOptions({
-      rpName: c.env.APP_NAME || 'Qmail',
+      rpName: c.env.APP_NAME || 'JMail',
       rpID,
       userID: await getUserId(db),
       userName: domain ? `admin@${domain}` : 'admin',
-      userDisplayName: `${c.env.APP_NAME || 'Qmail'} Admin`,
+      userDisplayName: `${c.env.APP_NAME || 'JMail'} Admin`,
       attestationType: 'none',
       excludeCredentials: existing.map(cred => ({
         id: cred.credential_id,

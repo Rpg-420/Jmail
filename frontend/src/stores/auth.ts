@@ -7,6 +7,7 @@ export const useAuthStore = defineStore('auth', () => {
   const isAuthenticated = ref(false);
   const needsSetup = ref(false);
   const hasPasskeys = ref(false);
+  const requiresSetupCode = ref(false);
   const isLoading = ref(true);
 
   const isReady = computed(() => !isLoading.value);
@@ -18,6 +19,7 @@ export const useAuthStore = defineStore('auth', () => {
       isAuthenticated.value = status.authenticated;
       needsSetup.value = status.needsSetup;
       hasPasskeys.value = status.hasPasskeys;
+      requiresSetupCode.value = !!status.requiresSetupCode;
     } catch {
       isAuthenticated.value = false;
       needsSetup.value = false;
@@ -62,8 +64,8 @@ export const useAuthStore = defineStore('auth', () => {
     return result;
   }
 
-  async function setup(password: string) {
-    const response = await api.setup(password);
+  async function setup(password: string, setupCode?: string) {
+    const response = await api.setup(password, setupCode);
     if (response.success) {
       isAuthenticated.value = true;
       needsSetup.value = false;
@@ -84,6 +86,7 @@ export const useAuthStore = defineStore('auth', () => {
     isAuthenticated,
     needsSetup,
     hasPasskeys,
+    requiresSetupCode,
     isLoading,
     isReady,
     checkAuth,

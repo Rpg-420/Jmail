@@ -1,11 +1,11 @@
-name = "qmail"
+name = "jmail"
 main = "src/index.ts"
 compatibility_date = "2026-08-01"
 
-# D1 Database - Replace with your database ID from: wrangler d1 create qmail-db
+# D1 Database - Replace with your database ID from: wrangler d1 create jmail-db
 [[d1_databases]]
 binding = "DB"
-database_name = "qmail-db"
+database_name = "jmail-db"
 database_id = "YOUR_DATABASE_ID_HERE"
 
 # Static assets from Vue build
@@ -17,11 +17,11 @@ run_worker_first = true
 not_found_handling = "single-page-application"
 
 # R2 bucket for attachments (optional). Enable R2 in the Cloudflare dashboard,
-# run: wrangler r2 bucket create qmail-attachments — then uncomment.
+# run: wrangler r2 bucket create jmail-attachments — then uncomment.
 # Without it attachments are stored inline in D1 (5MB cap instead of 25MB).
 # [[r2_buckets]]
 # binding = "ATTACHMENTS"
-# bucket_name = "qmail-attachments"
+# bucket_name = "jmail-attachments"
 
 # Cron: delivers scheduled emails and cleans up expired sessions
 [triggers]
@@ -29,5 +29,5 @@ crons = ["*/5 * * * *"]
 
 # Environment variables
 [vars]
-APP_NAME = "Qmail"
-WORKER_NAME = "qmail"
+APP_NAME = "JMail"
+WORKER_NAME = "jmail"

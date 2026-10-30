@@ -22,7 +22,7 @@ export class WebhooksAPI {
   /**
    * Create a transactional webhook
    */
-  async create(url: string, events: string[], description = 'Qmail delivery tracking'): Promise<{ id: number }> {
+  async create(url: string, events: string[], description = 'JMail delivery tracking'): Promise<{ id: number }> {
     return this.client.post<{ id: number }>('/webhooks', {
       url,
       events,

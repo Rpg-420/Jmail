@@ -19,8 +19,13 @@ const cfDomain = ref('');
 const cfDestinationEmail = ref('');
 const cfDnsRecords = ref<DNSRecord[]>([]);
 
-// Brevo form
-const brevoApiKey = ref('');
+// Sending relay form
+const relayChoice = ref<'brevo' | 'resend'>('brevo');
+const relayApiKey = ref('');
+const relayOptions = [
+  { id: 'brevo' as const, label: 'Brevo', note: '300 free sends a day' },
+  { id: 'resend' as const, label: 'Resend', note: '100 free sends a day' },
+];
 
 onMounted(async () => {
   await loadStatus();
@@ -37,7 +42,7 @@ async function loadStatus() {
     }
 
     // Determine current step based on what's configured
-    if (setupStatus.value.cloudflare.configured && setupStatus.value.brevo.configured) {
+    if (setupStatus.value.cloudflare.configured && setupStatus.value.relays.configured) {
       step.value = 3;
     } else if (setupStatus.value.cloudflare.configured) {
       step.value = 2;
@@ -76,24 +81,28 @@ async function saveCloudflare() {
   }
 }
 
-async function saveBrevo() {
+async function saveRelay() {
   error.value = '';
 
-  if (!brevoApiKey.value) {
+  if (!relayApiKey.value) {
     error.value = 'API Key is required';
     return;
   }
 
   isSaving.value = true;
   try {
-    await api.setupBrevo({
-      apiKey: brevoApiKey.value,
-    });
+    if (relayChoice.value === 'brevo') {
+      // Brevo has its own step because connecting it also registers the
+      // delivery-status webhook.
+      await api.setupBrevo({ apiKey: relayApiKey.value });
+    } else {
+      await api.saveProviderKey('resend', relayApiKey.value);
+    }
 
     step.value = 3;
     await loadStatus();
   } catch (e) {
-    error.value = e instanceof Error ? e.message : 'Failed to setup Brevo';
+    error.value = e instanceof Error ? e.message : 'Failed to connect that relay';
   } finally {
     isSaving.value = false;
   }
@@ -120,7 +129,7 @@ async function completeSetup() {
         <div class="mx-auto h-14 w-14 bg-accent rounded-2xl flex items-center justify-center mb-4">
           <img src="/favicon.svg" alt="" class="h-full w-full" />
         </div>
-        <h1 class="font-display text-3xl text-ink">Set up Qmail</h1>
+        <h1 class="font-display text-3xl text-ink">Set up JMail</h1>
         <p class="mt-2 text-ink-2">Connect your email services to get started</p>
       </div>
 
@@ -199,20 +208,47 @@ async function completeSetup() {
         </form>
       </div>
 
-      <!-- Step 2: Brevo -->
+      <!-- Step 2: sending relay -->
       <div v-if="!isLoading && step === 2" class="card p-6">
-        <h2 class="text-lg font-semibold text-ink mb-2">Step 2: Brevo (sending)</h2>
+        <h2 class="text-lg font-semibold text-ink mb-2">Step 2: Sending relay</h2>
         <p class="text-sm text-ink-2 mb-6">
-          Brevo sends mail from your domain. A free account is enough to start.
+          Cloudflare cannot send mail on the free tier, so outbound goes through a
+          transactional relay. One free account is enough — you can add the other later.
         </p>
 
-        <form class="space-y-4" @submit.prevent="saveBrevo">
+        <div class="grid grid-cols-2 gap-3 mb-6">
+          <button
+            v-for="option in relayOptions"
+            :key="option.id"
+            type="button"
+            class="rounded-lg border p-4 text-left"
+            :class="relayChoice === option.id ? 'border-accent bg-accent-soft' : 'border-edge hover:bg-surface-2'"
+            :aria-pressed="relayChoice === option.id"
+            @click="relayChoice = option.id"
+          >
+            <span class="block text-sm font-medium text-ink">{{ option.label }}</span>
+            <span class="block text-xs text-ink-2 mt-1">{{ option.note }}</span>
+          </button>
+        </div>
+
+        <form class="space-y-4" @submit.prevent="saveRelay">
           <div>
-            <label class="label">Brevo API Key</label>
-            <input v-model="brevoApiKey" type="password" required placeholder="Enter your Brevo API key" class="input" />
+            <label class="label">{{ relayChoice === 'brevo' ? 'Brevo' : 'Resend' }} API Key</label>
+            <input
+              v-model="relayApiKey"
+              type="password"
+              required
+              :placeholder="`Enter your ${relayChoice === 'brevo' ? 'Brevo' : 'Resend'} API key`"
+              class="input"
+            />
             <p class="hint">
-              <a href="https://app.brevo.com/settings/keys/api" target="_blank" rel="noopener noreferrer" class="text-accent hover:underline">
-                Get your API key from Brevo
+              <a
+                :href="relayChoice === 'brevo' ? 'https://app.brevo.com/settings/keys/api' : 'https://resend.com/api-keys'"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="text-accent hover:underline"
+              >
+                Get your API key from {{ relayChoice === 'brevo' ? 'Brevo' : 'Resend' }}
               </a>
             </p>
           </div>
@@ -220,7 +256,7 @@ async function completeSetup() {
           <div class="flex space-x-3">
             <button type="button" class="btn btn-ghost" @click="step = 1">Back</button>
             <button type="submit" :disabled="isSaving" class="btn btn-primary flex-1">
-              {{ isSaving ? 'Setting up…' : 'Continue' }}
+              {{ isSaving ? 'Checking key…' : 'Continue' }}
             </button>
           </div>
         </form>
@@ -228,8 +264,14 @@ async function completeSetup() {
         <div class="mt-6 p-4 bg-accent-soft rounded-lg">
           <h3 class="text-sm font-medium text-accent mb-1">Domain verification</h3>
           <p class="text-xs text-ink-2">
-            After setup, add and verify your sending domain in the
-            <a href="https://app.brevo.com/senders/domain/list" target="_blank" rel="noopener noreferrer" class="underline text-accent">Brevo dashboard</a>.
+            After setup, add and verify your sending domain with
+            <a
+              :href="relayChoice === 'brevo' ? 'https://app.brevo.com/senders/domain/list' : 'https://resend.com/domains'"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="underline text-accent"
+            >{{ relayChoice === 'brevo' ? 'Brevo' : 'Resend' }}</a>,
+            or outgoing mail will be refused or land in spam.
           </p>
         </div>
       </div>

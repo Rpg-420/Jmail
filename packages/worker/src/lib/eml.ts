@@ -34,8 +34,8 @@ export function buildEml(
 ): string {
   const lines: string[] = [];
   const date = new Date(email.created_at.includes('T') ? email.created_at : `${email.created_at.replace(' ', 'T')}Z`);
-  const mixedBoundary = `qmail-mixed-${email.id}`;
-  const altBoundary = `qmail-alt-${email.id}`;
+  const mixedBoundary = `jmail-mixed-${email.id}`;
+  const altBoundary = `jmail-alt-${email.id}`;
 
   lines.push(`From: ${encodeHeaderValue(email.from_address)}`);
   lines.push(`To: ${encodeHeaderValue(email.to_address)}`);

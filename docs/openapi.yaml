@@ -1,0 +1,692 @@
+openapi: 3.1.0
+info:
+  title: JMail mail-server API
+  version: 1.0.0
+  description: |
+    The bearer-token surface your other projects use instead of installing an SMTP
+    server: send mail, read mail the domain receives, and check what happened to a
+    message. Everything else in JMail (the web app, provider configuration, webhook
+    endpoints) uses the session-authenticated `/api/*` routes and is not described here.
+
+    Free-tier rules worth knowing before you wire a client up:
+
+    * a message may name at most 50 recipients in total and a subject of 998 characters
+    * outbound bodies are capped at 1 MB of `text` or 2 MB of `html`
+    * relays reset their daily quota at 00:00 UTC; a send that lands in an exhausted
+      day returns `202` and is deferred, never dropped
+    * `429` means "come back later" (`retry_after` is in seconds); `422` means the
+      relay rejected this message and retrying will not help
+
+    Narrative documentation: [`API.md`](./API.md) for endpoints,
+    [`WEBHOOKS.md`](./WEBHOOKS.md) for push delivery, [`INTEGRATIONS.md`](./INTEGRATIONS.md)
+    for per-language clients and the SMTP bridge.
+  license:
+    name: MIT
+
+servers:
+  - url: https://jmail.your-account.workers.dev/api/v1
+    description: The deployed Worker
+  - url: http://localhost:8787/api/v1
+    description: wrangler dev
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: mail
+    description: Sending and reading messages
+  - name: token
+    description: Identity and remaining capacity for the calling token
+
+paths:
+  /send:
+    post:
+      tags: [mail]
+      summary: Send a message
+      description: |
+        Requires the `send` scope.
+
+        The message is persisted before any relay is called, so a relay outage, an
+        exhausted daily quota, or a worker crash cannot lose it — the row stays in the
+        queue and the cron drain retries it on an increasing ladder (30s up to 24h, ten
+        attempts, then `failed`).
+
+        A `from` that is not the token's pinned `identity_address` must already exist in
+        the address list, otherwise the call is refused with `403 unverified_sender`.
+      operationId: sendMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendRequest'
+            examples:
+              plain_text:
+                summary: Minimal text message
+                value:
+                  from: alerts@yourdomain
+                  to: [you@yourdomain]
+                  subject: Deploy finished
+                  text: prod is up.
+              invoice_with_file:
+                summary: HTML plus attachment, retry-safe
+                value:
+                  from: receipts@yourdomain
+                  to: [customer@example.org]
+                  cc: [books@yourdomain]
+                  subject: Your invoice
+                  text: Thanks! Invoice #1042 is attached.
+                  html: "<p>Thanks! Invoice <b>#1042</b> is attached.</p>"
+                  reply_to: billing@yourdomain
+                  idempotency_key: invoice-1042
+                  labels: [billing]
+                  attachments:
+                    - filename: invoice-1042.pdf
+                      content: JVBERi0xLjQK
+                      content_type: application/pdf
+      responses:
+        '200':
+          description: |
+            The relay accepted the message (`status: sent`) — or, for a replayed
+            idempotency key, the original message is returned with `deduplicated: true`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              examples:
+                sent:
+                  value:
+                    id: 4c9a1d2e-7f1b-4a52-9c3e-1b2a5d6e7f80
+                    direction: outbound
+                    from: alerts@yourdomain
+                    to: you@yourdomain
+                    subject: Deploy finished
+                    status: sent
+                    provider: brevo
+                    provider_message_id: <20261028091233.abc123@yourdomain>
+                    created_at: '2026-10-28 09:12:33'
+                replayed:
+                  value:
+                    id: 4c9a1d2e-7f1b-4a52-9c3e-1b2a5d6e7f80
+                    direction: outbound
+                    status: sent
+                    deduplicated: true
+        '202':
+          description: |
+            Accepted but not yet delivered. The message is stored in all three
+            shapes and `GET /messages/{id}` reports how it ended. Three shapes:
+            * `status: queued` with `queued_for` — `send_at` is in the future
+            * `status: queued`, `retrying: true`, `reason` — no relay had room,
+              or no relay is configured, or one is down; the queue retries it
+            * `status: queued` alone — the queue's cron claimed the row while
+              this request was in flight, so that drain delivers it
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+              examples:
+                deferred:
+                  value:
+                    id: 7b2e5c1f-9a34-4f6d-8b21-0c9d2e4f6a13
+                    direction: outbound
+                    status: queued
+                    retrying: true
+                    reason: 'Every configured provider is at its daily or monthly quota'
+                scheduled:
+                  value:
+                    id: 9d1f2a3b-4c5d-6e7f-8a9b-0c1d2e3f4a5b
+                    direction: outbound
+                    status: queued
+                    queued_for: '2026-10-31 09:00:00'
+        '400':
+          description: Validation failure — the message is malformed, not the token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                too_many_recipients:
+                  value: { error: invalid_request, message: 'to exceeds 50 recipients' }
+                bad_subject:
+                  value: { error: invalid_request, message: 'subject exceeds 998 characters' }
+                bad_header:
+                  value:
+                    error: invalid_request
+                    message: 'header "To" is set by the mail server; use an X- prefixed name'
+        '401':
+          description: Missing, unknown, or revoked bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                unauthorized:
+                  value:
+                    error: unauthorized
+                    message: 'Provide a bearer token: Authorization: Bearer <token>'
+        '403':
+          description: The token is valid but not allowed to do this
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                missing_scope:
+                  value: { error: forbidden, message: 'Token is missing the "send" scope' }
+                wrong_identity:
+                  value:
+                    error: identity_mismatch
+                    message: This token may only send as billing@yourdomain
+                unknown_sender:
+                  value:
+                    error: unverified_sender
+                    message: '"nope@yourdomain" is not a configured From address.'
+        '422':
+          description: A relay permanently rejected the message. Do not retry it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageWithReason'
+              examples:
+                rejected:
+                  value:
+                    id: 2f6a8b1c-3d4e-5f6a-7b8c-9d0e1f2a3b4c
+                    direction: outbound
+                    status: failed
+                    error: rejected_by_relay
+                    detail: 'Invalid recipient address'
+        '429':
+          description: |
+            Per-token rate limit, the token's daily budget, or a global limit was hit.
+            Retry after `retry_after` seconds — queued mail is never lost by this.
+          headers:
+            Retry-After:
+              description: Seconds until the daily budget resets (00:00 UTC) or the window closes
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorWithRetry'
+              examples:
+                rate:
+                  value:
+                    error: rate_limited
+                    message: Token limit is 60 requests per minute
+                    retry_after: 22
+                budget:
+                  value:
+                    error: budget_exceeded
+                    message: Token daily budget of 200 sends is used up
+                    sent_today: 200
+        '500':
+          description: The message could not be persisted to the mailbox
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                storage:
+                  value: { error: storage_failed, message: 'Message could not be persisted' }
+
+  /messages:
+    get:
+      tags: [mail]
+      summary: List messages
+      description: |
+        Without `direction`, this lists the **calling token's own outbound** messages —
+        one project never sees another project's mail. `direction=inbound` lists mail the
+        domain received and requires the `read` scope.
+      operationId: listMessages
+      parameters:
+        - name: direction
+          in: query
+          description: "'inbound' switches to received mail (read scope); anything else is your own outbound list"
+          schema: { type: string, enum: [inbound] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: status
+          in: query
+          description: Outbound only — delivery status to filter on
+          schema:
+            type: string
+            enum: [pending, queued, deferred, delivered, opened, bounced, failed]
+        - name: idempotency_key
+          in: query
+          description: Outbound only — look up the message a business identifier produced
+          schema: { type: string }
+        - name: unread
+          in: query
+          description: Inbound only — `true` returns only unread messages
+          schema: { type: string, enum: ['true'] }
+        - name: label
+          in: query
+          description: Inbound only — filter by label
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of messages, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages, limit, offset]
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: '#/components/schemas/Message' }
+                  limit: { type: integer }
+                  offset: { type: integer }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /messages/{id}:
+    get:
+      tags: [mail]
+      summary: Fetch one message
+      description: |
+        Returns delivery state (and, for inbound messages, the body and attachment list).
+        A message belonging to another token is reported as `404`, not `403`, so token
+        ids do not leak which addresses other projects write to.
+      operationId: getMessage
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+      responses:
+        '200':
+          description: The message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: No such message, or it belongs to another token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              examples:
+                missing: { value: { error: not_found, message: No such message } }
+
+  /messages/{id}/attachments/{attachmentId}:
+    get:
+      tags: [mail]
+      summary: Download one attachment
+      description: Inbound messages only, and only with the `read` scope. Bytes come from R2 when the bucket is enabled, otherwise from D1.
+      operationId: getAttachment
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+        - name: attachmentId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The file
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500':
+          description: The row exists but its stored bytes are missing
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /messages/{id}/eml:
+    get:
+      tags: [mail]
+      summary: Download a message as RFC 5322 (.eml)
+      description: |
+        Requires the `read` scope — for outbound too, since the same route answers for
+        both directions. This is a reconstruction from the stored parts: the header block
+        plus the plain-text body. An HTML-only body is replaced by a note, and attachments
+        are not embedded; fetch them from `/messages/{id}/attachments/{attachmentId}`.
+      operationId: getEml
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+      responses:
+        '200':
+          description: The message source, offered as a download
+          headers:
+            Content-Disposition:
+              description: 'attachment; filename="message-<id>.eml"'
+              schema: { type: string }
+          content:
+            message/rfc822:
+              schema: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /messages/{id}/read:
+    post:
+      tags: [mail]
+      summary: Mark a message read
+      description: Requires the `read` scope for inbound mail. Idempotent.
+      operationId: markRead
+      parameters:
+        - $ref: '#/components/parameters/MessageId'
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { success: { type: boolean, const: true } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /quota:
+    get:
+      tags: [token]
+      summary: Remaining capacity for this token and the relay pool
+      description: |
+        Requires the `status` scope. Call it before a large run: `total_remaining_today`
+        is the sum of what every configured relay still allows today, so `0` means mail
+        will be deferred until 00:00 UTC rather than sent now.
+      operationId: getQuota
+      responses:
+        '200':
+          description: Three budgets — the token's, each relay's, and the pool total
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Quota' }
+              examples:
+                quota:
+                  value:
+                    day: '2026-10-28'
+                    token:
+                      name: billing-app
+                      daily_budget: 200
+                      sent_today: 41
+                      failed_today: 2
+                      remaining_today: 157
+                      rate_per_min: 10
+                    providers:
+                      - id: brevo
+                        label: Brevo
+                        quota_day: 300
+                        used_day: 212
+                        remaining_day: 88
+                      - id: resend
+                        label: Resend
+                        quota_day: 100
+                        used_day: 100
+                        remaining_day: 0
+                    total_remaining_today: 88
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /whoami:
+    get:
+      tags: [token]
+      summary: Describe the calling token
+      description: |
+        The first call an integration should make. The secret and its hash are never
+        returned in any form.
+      operationId: whoami
+      responses:
+        '200':
+          description: Token identity
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Whoami' }
+              examples:
+                whoami:
+                  value:
+                    id: tk_9f2c4a1b
+                    name: billing-app
+                    scopes: [send, status]
+                    identity_address: billing@yourdomain
+                    rate_per_min: 10
+                    daily_budget: 200
+                    created_at: '2026-10-01 08:00:00'
+                    last_used_at: '2026-10-28 09:12:30'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        A mail-server token created under Mail server → Tokens (or `POST /api/tokens`
+        with an admin session). Sent as `Authorization: Bearer jmail_…`, over HTTPS only.
+
+  parameters:
+    MessageId:
+      name: id
+      in: path
+      required: true
+      description: The message id returned by `/send` or `/messages`
+      schema: { type: string }
+
+  responses:
+    Unauthorized:
+      description: Missing, unknown, or revoked bearer token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          examples:
+            unauthorized:
+              value: { error: unauthorized, message: 'Unknown or revoked token' }
+    Forbidden:
+      description: The token lacks the required scope
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: No such message or attachment (also the answer for another token's mail)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: Per-token rate limit or daily budget reached; retry after the indicated delay
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorWithRetry' }
+
+  schemas:
+    SendRequest:
+      type: object
+      required: [to, subject]
+      additionalProperties: false
+      properties:
+        from:
+          type: string
+          description: >
+            `address@yourdomain` or `Display Name <address@yourdomain>`. Optional when the
+            token pins `identity_address`; then it may only repeat that address.
+        to:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { type: string, format: email }
+          description: Recipients. Counted together with cc and bcc against the 50-recipient relay cap.
+        cc:
+          type: array
+          maxItems: 50
+          items: { type: string, format: email }
+        bcc:
+          type: array
+          maxItems: 50
+          items: { type: string, format: email }
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 998
+        text:
+          type: string
+          maxLength: 1000000
+          description: Plain-text body. At least one of `text` / `html` is required.
+        html:
+          type: string
+          maxLength: 2000000
+          description: |
+            HTML body, sent as-is — it is delivered, not rendered, so no sanitising happens
+            here. Keep it to what your own template produced.
+        reply_to:
+          type: string
+          description: Address that answers should go to (aliases `replyTo`)
+        headers:
+          type: object
+          maxProperties: 20
+          additionalProperties: { type: string, maxLength: 500 }
+          description: |
+            Only `X-`-prefixed names plus `Reply-To`, `In-Reply-To` and `References`.
+            Values containing CR or LF are rejected — that is header injection. Envelope
+            and identity headers (`From`, `To`, `Cc`, `Bcc`, `Subject`, `Content-Type`,
+            `MIME-Version`, `Message-ID`, `Date`, `Sender`, `Return-Path`, `Received`,
+            `DKIM-Signature`) are set by the mail server and cannot be supplied.
+        attachments:
+          type: array
+          maxItems: 10
+          items: { $ref: '#/components/schemas/Attachment' }
+        send_at:
+          type: string
+          format: date-time
+          description: >
+            ISO datetime, UTC recommended. Past or within-the-minute values send now; a
+            future value is stored for the cron drain (aliases `schedule_at`).
+        labels:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 40 }
+          description: Mailbox labels. The token's own name is always added, which is how a project filters its mail.
+        idempotency_key:
+          type: string
+          maxLength: 120
+          description: >
+            Business identifier (`invoice-1042`, not a random UUID). A repeat with the same
+            key and token returns the original message with `deduplicated: true` and sends
+            nothing again.
+    Attachment:
+      type: object
+      required: [filename, content]
+      properties:
+        filename: { type: string }
+        content:
+          type: string
+          contentEncoding: base64
+          description: >
+            Base64 of the file bytes. Defaults are 5 MiB per file and 10 MiB per message
+            across at most 10 files; the two byte limits are settings
+            (`max_api_attachment_bytes`, `max_api_total_bytes`).
+        content_type:
+          type: string
+          description: MIME type; blocked types (scripts and the like) are refused. Aliases `contentType`.
+    Message:
+      type: object
+      description: The stable view of one message, inbound or outbound
+      properties:
+        id: { type: string }
+        direction: { type: string, enum: [inbound, outbound] }
+        from: { type: string }
+        to: { type: string }
+        cc: { type: [string, 'null'] }
+        subject: { type: string }
+        status:
+          type: string
+          enum: [received, pending, queued, deferred, delivered, opened, bounced, failed]
+          description: Inbound messages are always `received`; outbound tracks delivery
+        provider: { type: [string, 'null'], description: 'Relay that accepted it: brevo, resend, or null while unsent' }
+        provider_message_id: { type: [string, 'null'], description: 'Relay-side id, returned on /send responses; store it against your own record' }
+        attempts: { type: [integer, 'null'], description: Relay attempts so far }
+        last_error: { type: [string, 'null'], description: Last failure text, truncated to 500 chars }
+        labels: { type: array, items: { type: string } }
+        message_id: { type: [string, 'null'], description: 'The RFC 5322 Message-ID, used as the thread anchor' }
+        thread_id: { type: [string, 'null'] }
+        created_at: { type: string, description: 'SQLite datetime, UTC' }
+        scheduled_at: { type: [string, 'null'] }
+        deduplicated: { type: boolean, description: 'Present and true only when an idempotency key replayed' }
+        queued_for: { type: string, description: 'Present on a future-dated send' }
+        retrying: { type: boolean, description: 'Present when nothing had room and the queue will retry' }
+        reason: { type: string, description: 'Why it is retrying, truncated to 200 chars' }
+    MessageWithReason:
+      allOf:
+        - $ref: '#/components/schemas/Message'
+        - type: object
+          properties:
+            error: { type: string }
+            detail: { type: string }
+    MessageDetail:
+      allOf:
+        - $ref: '#/components/schemas/Message'
+        - type: object
+          description: |
+            Inbound messages additionally expose their content here — the list endpoint
+            deliberately omits bodies. An outbound message under the same token returns
+            only the fields above, because its content is what you already sent.
+          properties:
+            text: { type: [string, 'null'], description: 'Plain-text body as received' }
+            html: { type: [string, 'null'], description: 'HTML body as received, unrendered and unsanitised' }
+            headers: { type: [object, 'null'], additionalProperties: { type: string } }
+            attachments:
+              type: array
+              description: Download each by id from `/messages/{id}/attachments/{attachmentId}`
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  filename: { type: string }
+                  content_type: { type: string }
+                  size: { type: integer }
+    Quota:
+      type: object
+      properties:
+        day: { type: string, description: 'UTC day the numbers cover, YYYY-MM-DD' }
+        token:
+          type: object
+          properties:
+            name: { type: string }
+            daily_budget: { type: integer }
+            sent_today: { type: integer }
+            failed_today: { type: integer }
+            remaining_today: { type: integer }
+            rate_per_min: { type: integer }
+        providers:
+          type: array
+          description: Configured relays only, in failover order; a provider with no key is omitted
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              label: { type: string }
+              quota_day: { type: integer, description: 'Daily allowance in use, free-plan default or your override' }
+              used_day: { type: integer }
+              remaining_day: { type: integer }
+        total_remaining_today: { type: integer, description: 'Sum of the relays still able to accept mail today' }
+    Whoami:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        scopes:
+          type: array
+          items: { type: string, enum: [send, read, status] }
+        identity_address: { type: [string, 'null'] }
+        rate_per_min: { type: integer }
+        daily_budget: { type: integer }
+        created_at: { type: string }
+        last_used_at: { type: [string, 'null'] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [invalid_request, unauthorized, forbidden, identity_mismatch, unverified_sender, not_found, rejected_by_relay, rate_limited, budget_exceeded, storage_failed, attachment_unavailable]
+        message: { type: string }
+    ErrorWithRetry:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          properties:
+            retry_after: { type: integer, description: Seconds to wait before retrying }
+            sent_today: { type: integer }

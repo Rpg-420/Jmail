@@ -2,36 +2,46 @@ import { Hono } from 'hono';
 import api from './api/routes';
 import { handleEmail } from './email-handler';
 import { DatabaseQueries } from './db/queries';
-import { deliverStoredEmail, recordRecipientsAsContacts } from './lib/mailer';
+import { processEmailQueue } from './lib/mailer';
+import { drainWebhookDeliveries } from './lib/webhooks-out';
 
 export interface Env {
   DB: D1Database;
-  JWT_SECRET?: string;
   ASSETS?: Fetcher;
   ATTACHMENTS?: R2Bucket;
 }
 
+async function settingsNumber(db: DatabaseQueries, key: string, fallback: number): Promise<number> {
+  const raw = await db.getSetting(key);
+  const value = Number.parseInt(raw ?? '', 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 /**
- * Cron: deliver due scheduled emails and clean up expired rows.
+ * Cron: drain the send queue, deliver queued webhooks, and prune housekeeping rows.
  */
 async function runScheduledTasks(env: Env): Promise<void> {
   const db = new DatabaseQueries(env.DB);
 
-  // Send due scheduled emails
-  const due = await db.listDueScheduledEmails();
-  for (const email of due) {
-    try {
-      const messageId = await deliverStoredEmail(db, env.ATTACHMENTS, email);
-      await db.markEmailSent(email.id, messageId || null);
-      await recordRecipientsAsContacts(db, email);
-      console.log(`Scheduled email sent: ${email.id}`);
-    } catch (error) {
-      console.error(`Scheduled email failed: ${email.id}`, error);
-      await db.markScheduledFailed(email.id);
-    }
+  const queue = await processEmailQueue(db, env.ATTACHMENTS, 20);
+  const webhooks = await drainWebhookDeliveries(db, 25);
+  console.log(`cron queue=${JSON.stringify(queue)} webhooks=${JSON.stringify(webhooks)}`);
+
+  // Rows that never made it out are dropped from the queue after the retention
+  // window; the message body stays in the mailbox as a failed draft.
+  const retentionDays = await settingsNumber(db, 'queue_retention_days', 14);
+  const expired = await db.listExpiredQueueEmails(retentionDays);
+  for (const email of expired) {
+    await db.updateEmailQueueFields(email.id, {
+      delivery_status: 'failed',
+      attempts: email.attempts ?? 0,
+      next_attempt_at: null,
+      last_error: 'Expired: not delivered within the retention window',
+      provider: null,
+    });
   }
 
-  // Housekeeping
+  await db.pruneWebhookDeliveries(7);
   await db.cleanExpiredSessions();
 }
 
@@ -99,11 +109,11 @@ app.get('*', async (c) => {
   }
 
   // Fallback HTML for when assets aren't available
-  return c.html(`
+  const fallback = c.html(`
     <!DOCTYPE html>
     <html>
       <head>
-        <title>Qmail</title>
+        <title>JMail</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
@@ -130,7 +140,7 @@ app.get('*', async (c) => {
       </head>
       <body>
         <div class="container">
-          <h1>Qmail</h1>
+          <h1>JMail</h1>
           <p>Frontend assets not found.</p>
           <p>Build the frontend and deploy to see the full application.</p>
           <p><a href="/api/health">Check API Health</a></p>
@@ -138,6 +148,7 @@ app.get('*', async (c) => {
       </body>
     </html>
   `);
+  return withSecurityHeaders(fallback);
 });
 
 // Export the worker

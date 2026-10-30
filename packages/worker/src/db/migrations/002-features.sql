@@ -1,7 +1,7 @@
 -- Migration 002: threading, drafts, scheduled send, archive, labels,
 -- delivery status, full-text search, R2 attachments, push subscriptions.
 -- Run ONCE against databases created before this migration:
---   wrangler d1 execute qmail-db --remote --file=./src/db/migrations/002-features.sql
+--   wrangler d1 execute jmail-db --remote --file=./src/db/migrations/002-features.sql
 -- Fresh installs get all of this from schema.sql and must NOT run this file.
 
 -- Rebuild attachments FIRST, dropping its foreign key: with foreign_keys on,

@@ -1,16 +1,17 @@
 import { Hono } from 'hono';
 import { DatabaseQueries } from '../db/queries';
-import { hashPassword, verifyPassword, generateToken, generateId, sha256Hex, sqliteDateTime } from '../lib/utils';
+import { hashPassword, verifyPassword, generateToken, generateId, sha256Hex, sqliteDateTime, timingSafeEqual } from '../lib/utils';
 import { isValidPassword } from '../lib/validation';
 
 export interface Env {
   DB: D1Database;
-  JWT_SECRET?: string;
+  /** Optional first-run gate: when set, /auth/setup must present it. */
+  SETUP_CODE?: string;
 }
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-function extractBearerToken(header: string | undefined): string | null {
+export function extractBearerToken(header: string | undefined): string | null {
   if (!header) return null;
   const match = header.match(/^Bearer\s+(.+)$/i);
   return match ? match[1] : null;
@@ -65,6 +66,13 @@ auth.post('/login', async (c) => {
       return c.json({ error: 'Invalid password' }, 401);
     }
 
+    // A hash from the pre-PBKDF2 releases is unsalted and single-round, so it is
+    // crackable offline if D1 ever leaks. The password is in hand exactly once —
+    // right here — so that is when it gets re-stretched.
+    if (!storedHash.startsWith('pbkdf2:')) {
+      await db.setSetting('admin_password_hash', await hashPassword(password));
+    }
+
     const { token, expiresAt } = await createAdminSession(db);
 
     return c.json({
@@ -111,7 +119,16 @@ auth.post('/setup', async (c) => {
       return c.json({ error: 'Already setup' }, 400);
     }
 
-    const { password } = await c.req.json<{ password: string }>();
+    const { password, setupCode } = await c.req.json<{ password: string; setupCode?: string }>();
+
+    // The workers.dev URL is public from the moment it is deployed, and the
+    // first caller to post a password becomes the admin. A deploy-time secret
+    // closes that window without complicating local development.
+    if (c.env.SETUP_CODE) {
+      if (!setupCode || !timingSafeEqual(setupCode, c.env.SETUP_CODE)) {
+        return c.json({ error: 'Setup code required. Pass "setupCode" matching the SETUP_CODE secret.' }, 403);
+      }
+    }
 
     const passwordCheck = isValidPassword(password);
     if (!passwordCheck.valid) {
@@ -144,6 +161,9 @@ auth.get('/status', async (c) => {
   try {
     const token = extractBearerToken(c.req.header('Authorization'));
     const hasPasskeys = (await db.countCredentials()) > 0;
+    // Told to the client so the setup screen can show the code field instead
+    // of letting the user guess why the first attempt was refused.
+    const requiresSetupCode = !!c.env.SETUP_CODE;
 
     if (!token) {
       const hasPassword = await db.getSetting('admin_password_hash');
@@ -151,6 +171,7 @@ auth.get('/status', async (c) => {
         authenticated: false,
         needsSetup: !hasPassword,
         hasPasskeys,
+        requiresSetupCode,
       });
     }
 
@@ -162,6 +183,7 @@ auth.get('/status', async (c) => {
         authenticated: false,
         needsSetup: !hasPassword,
         hasPasskeys,
+        requiresSetupCode,
       });
     }
 
@@ -169,6 +191,7 @@ auth.get('/status', async (c) => {
       authenticated: true,
       needsSetup: false,
       hasPasskeys,
+      requiresSetupCode: false,
     });
   } catch (error) {
     console.error('Auth status error:', error);
@@ -219,7 +242,11 @@ auth.post('/change-password', async (c) => {
     const newHash = await hashPassword(newPassword);
     await db.setSetting('admin_password_hash', newHash);
 
-    return c.json({ success: true });
+    // Rotating the secret invalidates every session, including this one, so a
+    // stolen cookie/token cannot survive a compromise cleanup.
+    await db.deleteAllSessions();
+
+    return c.json({ success: true, reauth_required: true });
   } catch (error) {
     console.error('Change password error:', error);
     return c.json({ error: 'Failed to change password' }, 500);

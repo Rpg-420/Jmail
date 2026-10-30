@@ -1,38 +1,10 @@
 import { Hono } from 'hono';
 import { DatabaseQueries } from '../db/queries';
-import { CloudflareEmailAPI } from '@qmail/cloudflare-email-api';
-import { BrevoAPI } from '@qmail/brevo-api';
-import { generateId, generateToken } from '../lib/utils';
-
-/**
- * Register (or reuse) the Brevo transactional webhook that reports
- * delivery status back to this deployment. Never fatal.
- */
-async function ensureBrevoWebhook(
-  db: DatabaseQueries,
-  brevo: BrevoAPI,
-  requestUrl: string
-): Promise<void> {
-  try {
-    let secret = await db.getSetting('brevo_webhook_secret');
-    if (!secret) {
-      secret = generateToken(24);
-      await db.setSetting('brevo_webhook_secret', secret);
-    }
-
-    const url = `${new URL(requestUrl).origin}/api/webhooks/brevo/${secret}`;
-    const existing = await brevo.webhooks.list();
-
-    if (!existing.some(w => w.url === url)) {
-      const created = await brevo.webhooks.create(url, [
-        'request', 'delivered', 'hardBounce', 'softBounce', 'blocked', 'invalid_email', 'deferred', 'uniqueOpened',
-      ]);
-      await db.setSetting('brevo_webhook_id', String(created.id));
-    }
-  } catch (error) {
-    console.warn('Brevo webhook registration failed (delivery tracking disabled):', error);
-  }
-}
+import { CloudflareEmailAPI } from '@jmail/cloudflare-email-api';
+import { BrevoAPI } from '@jmail/brevo-api';
+import { generateId } from '../lib/utils';
+import { ensureBrevoWebhook } from '../lib/brevo-webhook';
+import { listProviderStatuses } from '../lib/providers';
 
 export interface Env {
   DB: D1Database;
@@ -56,7 +28,8 @@ setup.get('/status', async (c) => {
       settings.cloudflare_zone_id
     );
 
-    const hasBrevo = !!settings.brevo_api_key;
+    const statuses = await listProviderStatuses(db);
+    const connected = statuses.filter(status => status.configured);
 
     return c.json({
       setupCompleted: settings.setup_completed === 'true',
@@ -66,8 +39,9 @@ setup.get('/status', async (c) => {
         configured: hasCloudflare,
         zoneId: settings.cloudflare_zone_id || null,
       },
-      brevo: {
-        configured: hasBrevo,
+      relays: {
+        configured: connected.length > 0,
+        connected: connected.map(status => ({ id: status.id, label: status.label })),
       },
     });
   } catch (error) {
@@ -125,7 +99,7 @@ setup.post('/cloudflare', async (c) => {
     // The worker will store emails and forward them to the destination
     const catchAllRule = await cfApi.routing.setupCatchAllWorker(
       zone.id,
-      c.env.WORKER_NAME || 'qmail'
+      c.env.WORKER_NAME || 'jmail'
     );
 
     // Save settings
@@ -179,7 +153,7 @@ setup.post('/cloudflare/worker-routing', async (c) => {
 
   try {
     const body = await c.req.json<{ workerName?: string }>().catch(() => ({} as { workerName?: string }));
-    const workerName = body.workerName || c.env.WORKER_NAME || 'qmail';
+    const workerName = body.workerName || c.env.WORKER_NAME || 'jmail';
 
     const apiKey = await db.getSetting('cloudflare_api_key');
     const accountId = await db.getSetting('cloudflare_account_id');
@@ -369,7 +343,9 @@ setup.post('/complete', async (c) => {
     if (!settings.cloudflare_api_key) missing.push('Cloudflare API Key');
     if (!settings.cloudflare_account_id) missing.push('Cloudflare Account ID');
     if (!settings.cloudflare_zone_id) missing.push('Cloudflare Zone ID');
-    if (!settings.brevo_api_key) missing.push('Brevo API Key');
+    if (!(await listProviderStatuses(db)).some(status => status.configured)) {
+      missing.push('A sending relay');
+    }
     if (!settings.domain) missing.push('Domain');
     // destination_email is now optional
 

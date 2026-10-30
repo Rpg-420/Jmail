@@ -81,6 +81,11 @@ const router = createRouter({
           name: 'settings',
           component: () => import('@/views/Settings.vue'),
         },
+        {
+          path: 'mail-server',
+          name: 'mail-server',
+          component: () => import('@/views/MailServer.vue'),
+        },
       ],
     },
   ],

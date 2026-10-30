@@ -1,4 +1,4 @@
-"""Usage: python scripts/verify-qmail-upgrade.py /private/path/backup.sql
+"""Usage: python scripts/verify-jmail-upgrade.py /private/path/backup.sql
 Never prints email contents, credentials or session tokens. No network access.
 """
 import hashlib

@@ -28,7 +28,13 @@ const SENSITIVE_SETTINGS = [
   'brevo_webhook_secret',
   'vapid_private_jwk',
   'telegram_bot_token',
+  'webhook_secret',
 ];
+
+/** Relay keys live in D1 as provider_key_<id>; never echo them back. */
+function isSensitiveKey(key: string): boolean {
+  return SENSITIVE_SETTINGS.includes(key) || key.startsWith('provider_key_');
+}
 
 /**
  * Get all settings
@@ -42,7 +48,7 @@ settings.get('/', async (c) => {
     // Mask sensitive values
     const maskedSettings: Record<string, string> = {};
     for (const [key, value] of Object.entries(allSettings)) {
-      if (SENSITIVE_SETTINGS.includes(key) && value) {
+      if (isSensitiveKey(key) && value) {
         maskedSettings[key] = '********';
       } else {
         maskedSettings[key] = value;
@@ -82,7 +88,7 @@ settings.post('/telegram/test', async (c) => {
   const db = new DatabaseQueries(c.env.DB);
   try {
     await sendTelegramMessage(await db.getSetting('telegram_bot_token') || '', await db.getSetting('telegram_chat_id') || '',
-      'Qmail is connected. New incoming emails will be delivered here when Telegram forwarding is enabled.');
+      'JMail is connected. New incoming emails will be delivered here when Telegram forwarding is enabled.');
     return c.json({ success: true });
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : 'Telegram test failed' }, 400);

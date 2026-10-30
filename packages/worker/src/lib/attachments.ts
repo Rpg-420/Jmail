@@ -118,3 +118,67 @@ export async function deleteAttachmentObjects(
     await bucket.delete(keys);
   }
 }
+
+// ==================== Base64 helpers shared by the UI and the mail API ====================
+
+const BASE64_PATTERN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+export function base64ToBytes(content: string): Uint8Array {
+  return base64ToUint8(content);
+}
+
+/** Decoded size, without materialising the bytes. */
+export function base64ByteLength(content: string): number {
+  const padding = content.endsWith('==') ? 2 : content.endsWith('=') ? 1 : 0;
+  return Math.floor((content.length * 3) / 4) - padding;
+}
+
+export function isValidBase64(content: string): boolean {
+  return content.length % 4 === 0 && BASE64_PATTERN.test(content);
+}
+
+export interface AttachmentLimits {
+  perFile: number;
+  total: number;
+  count: number;
+}
+
+export interface OutgoingAttachment {
+  filename?: string;
+  content?: string;
+  content_type?: string;
+  contentType?: string;
+}
+
+/**
+ * Validate a caller-supplied attachment list. Shared so the web UI and the
+ * public API can never disagree about what is accepted.
+ */
+export function validateOutgoingAttachments(
+  attachments: unknown,
+  limits: AttachmentLimits,
+  isAllowedType: (contentType: string) => boolean
+): string | null {
+  if (attachments === undefined || attachments === null) return null;
+  if (!Array.isArray(attachments)) return 'attachments must be an array';
+  if (attachments.length > limits.count) return `Too many attachments (max ${limits.count})`;
+
+  let totalSize = 0;
+  for (const raw of attachments as OutgoingAttachment[]) {
+    const filename = typeof raw?.filename === 'string' ? raw.filename.trim() : '';
+    const content = typeof raw?.content === 'string' ? raw.content : '';
+    if (!filename || !content) return 'Each attachment needs filename and content';
+    if (!isValidBase64(content)) return `Attachment "${filename}" is not valid base64`;
+
+    const contentType = raw.content_type ?? raw.contentType;
+    if (contentType && !isAllowedType(contentType)) return `Attachment type not allowed: ${contentType}`;
+
+    const size = base64ByteLength(content);
+    if (size > limits.perFile) return `Attachment "${filename}" exceeds ${Math.round(limits.perFile / 1024 / 1024)}MB`;
+    totalSize += size;
+  }
+
+  if (totalSize > limits.total) return `Total attachment size exceeds ${Math.round(limits.total / 1024 / 1024)}MB`;
+  return null;
+}
+

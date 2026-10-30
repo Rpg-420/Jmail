@@ -1,4 +1,4 @@
--- Qmail D1 Database Schema (fresh installs; existing DBs use migrations/)
+-- JMail D1 Database Schema (fresh installs; existing DBs use migrations/)
 
 -- Settings table for storing configuration
 CREATE TABLE IF NOT EXISTS settings (
@@ -29,7 +29,13 @@ CREATE TABLE IF NOT EXISTS emails (
     thread_id TEXT,                 -- conversation grouping key
     delivery_status TEXT,           -- queued | delivered | bounced | deferred | opened | failed
     scheduled_at TEXT,              -- for type='scheduled' (SQLite datetime format)
-    mailgun_id TEXT,
+    provider_message_id TEXT,       -- id the outbound relay returned for this send
+    token_id TEXT,                  -- API token that queued the send (mail-server API)
+    idempotency_key TEXT,           -- caller-supplied dedupe key
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    provider TEXT,                  -- relay that accepted the send
     created_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -43,7 +49,7 @@ CREATE INDEX IF NOT EXISTS idx_emails_thread ON emails(thread_id);
 CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
 CREATE INDEX IF NOT EXISTS idx_emails_archived ON emails(archived);
 CREATE INDEX IF NOT EXISTS idx_emails_scheduled ON emails(type, scheduled_at);
-CREATE INDEX IF NOT EXISTS idx_emails_mailgun ON emails(mailgun_id);
+CREATE INDEX IF NOT EXISTS idx_emails_provider_message ON emails(provider_message_id);
 
 -- Attachments table for storing email attachments.
 -- No FK on purpose: deletion is handled explicitly in code, and an FK here
@@ -182,3 +188,84 @@ CREATE TABLE IF NOT EXISTS email_folders (
   folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_email_folders_folder ON email_folders(folder_id);
+
+-- ==================== Mail-server layer (see migrations/004-mail-server.sql) ====================
+
+-- API tokens that other projects authenticate with (secret stored as SHA-256)
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id TEXT PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,          -- first 10 chars, shown in the UI
+    name TEXT NOT NULL,
+    scopes TEXT NOT NULL DEFAULT '["send"]',  -- JSON array: send | read | status
+    identity_address TEXT,               -- when set, From is forced to this address
+    rate_per_min INTEGER NOT NULL DEFAULT 60,
+    daily_budget INTEGER NOT NULL DEFAULT 500,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    revoked_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_api_tokens_revoked ON api_tokens(revoked_at);
+
+-- Per-provider consumption, so free-tier quotas are enforced locally
+-- before a relay ever rejects us. period is 'YYYY-MM-DD' (day) or 'YYYY-MM' (month).
+CREATE TABLE IF NOT EXISTS provider_usage (
+    provider TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('day', 'month')),
+    period TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (provider, kind, period)
+);
+
+-- Per-token daily send counts (budget enforcement, separate from provider quota)
+CREATE TABLE IF NOT EXISTS token_usage (
+    token_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    sent INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (token_id, day)
+);
+
+-- Outbound webhook endpoints that projects register to receive delivery events
+CREATE TABLE IF NOT EXISTS webhook_endpoints (
+    id TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    secret TEXT NOT NULL,                -- HMAC-SHA256 signing key
+    events TEXT NOT NULL DEFAULT '["delivered","bounced","failed"]',
+    token_id TEXT,                       -- when set, only this token's mail fires it
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Webhook delivery queue with retry/backoff
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id TEXT PRIMARY KEY,
+    endpoint_id TEXT NOT NULL,
+    event TEXT NOT NULL,
+    payload TEXT NOT NULL,               -- JSON body that gets signed
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'delivered', 'failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    delivered_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due ON webhook_deliveries(status, next_attempt_at);
+
+CREATE INDEX IF NOT EXISTS idx_emails_token ON emails(token_id);
+CREATE INDEX IF NOT EXISTS idx_emails_queue ON emails(type, delivery_status, next_attempt_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_emails_idempotency
+    ON emails(token_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+
+-- Per-relay quotas default to the free-tier limits in the provider registry;
+-- provider_quota_<id>_day and provider_quota_<id>_month override them here.
+INSERT OR IGNORE INTO settings (key, value) VALUES
+    ('provider_order', '["brevo","resend"]'),
+    ('max_api_attachment_bytes', '5242880'),
+    ('max_api_total_bytes', '10485760'),
+    ('queue_retention_days', '14');

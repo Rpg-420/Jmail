@@ -1,6 +1,6 @@
 {
-  "name": "Qmail",
-  "short_name": "Qmail",
+  "name": "JMail",
+  "short_name": "JMail",
   "description": "Mail on your own domain",
   "id": "/",
   "scope": "/",
