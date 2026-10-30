@@ -9,6 +9,7 @@
     "db:migrate": "npx wrangler d1 execute DB --local --file=./src/db/schema.sql",
     "db:migrate:prod": "npx wrangler d1 execute DB --remote --file=./src/db/schema.sql",
     "test": "node --test",
+    "typecheck": "tsc --noEmit",
     "tail": "npx wrangler tail"
   },
   "dependencies": {

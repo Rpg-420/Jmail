@@ -1,5 +1,7 @@
 # JMail
 
+![CI](https://github.com/Rpg-420/Jmail/actions/workflows/ci.yml/badge.svg)
+
 **فارسی:** مستندات کامل به فارسی در [docs/fa/](docs/fa/README.md) (نصب، مرجع API، اتصال پروژه‌ها، وب‌هوک).
 
 JMail is the project name throughout the app, workspace packages, notifications and exports.

@@ -8,6 +8,7 @@
     "dev:frontend": "pnpm --filter @jmail/frontend dev",
     "build": "pnpm -r build",
     "build:frontend": "pnpm --filter @jmail/frontend build",
+    "typecheck": "pnpm -r typecheck",
     "deploy": "pnpm build && pnpm --filter @jmail/worker run deploy",
     "db:migrate": "pnpm --filter @jmail/worker db:migrate",
     "db:migrate:prod": "pnpm --filter @jmail/worker db:migrate:prod",
